@@ -8,24 +8,30 @@ export function BindPanel({ t }: BindPanelProps): React.ReactElement {
   const [key, setKey] = React.useState('')
   const [binding, setBinding] = React.useState<{ bound: boolean; key?: string; summary?: string } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
-  const [busy, setBusy] = React.useState(false)
+  const busyRef = React.useRef(false)
+  const [, setBusy] = React.useState(false)  // keep for re-render only
 
   // sessionId comes from a global injected by host; fall back to placeholder
   const sessionId = (window as any).__DSH_CURRENT_SESSION_ID__ ?? 'unknown'
 
-  async function refresh() {
-    try {
-      const r = await fetch(`/api/scjira/get-binding?sessionId=${encodeURIComponent(sessionId)}`, { credentials: 'include' })
-      const body = await r.json()
-      setBinding({ bound: body.bound, key: body.key, summary: body.summary })
-    } catch (err) {
-      setError(String(err))
+  React.useEffect(() => {
+    let aborted = false
+    async function load() {
+      try {
+        const r = await fetch(`/api/scjira/get-binding?sessionId=${encodeURIComponent(sessionId)}`, { credentials: 'include' })
+        const body = await r.json()
+        if (!aborted) setBinding({ bound: body.bound, key: body.key, summary: body.summary })
+      } catch (err) {
+        if (!aborted) setError(String(err))
+      }
     }
-  }
-
-  React.useEffect(() => { refresh() }, [])
+    load()
+    return () => { aborted = true }
+  }, [])
 
   async function submit() {
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     setError(null)
     try {
@@ -37,7 +43,10 @@ export function BindPanel({ t }: BindPanelProps): React.ReactElement {
       })
       const body = await r.json()
       if (body.ok) {
-        await refresh()
+        // Refresh inline (no abort flag for post-submit; component should still be mounted)
+        const r2 = await fetch(`/api/scjira/get-binding?sessionId=${encodeURIComponent(sessionId)}`, { credentials: 'include' })
+        const body2 = await r2.json()
+        setBinding({ bound: body2.bound, key: body2.key, summary: body2.summary })
         setKey('')
       } else {
         setError(body.error ?? 'bind failed')
@@ -45,6 +54,7 @@ export function BindPanel({ t }: BindPanelProps): React.ReactElement {
     } catch (err) {
       setError(String(err))
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }
@@ -71,7 +81,7 @@ export function BindPanel({ t }: BindPanelProps): React.ReactElement {
         />
         <button
           onClick={submit}
-          disabled={busy || !/^[A-Z][A-Z0-9_]*-\d+$/.test(key)}
+          disabled={!/^[A-Z][A-Z0-9_]*-\d+$/.test(key)}
           style={{ padding: '4px 12px', background: 'var(--dsh-accent, #4af)', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}
         >
           {t('bind.btn')}
