@@ -79,6 +79,17 @@ describe('JiraClient', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.error).toBe('parse')
   })
+
+  it('issue() passes AbortSignal through to spawn', async () => {
+    const controller = new AbortController()
+    // Configure the mock to verify the signal is passed through
+    mockSpawn.mockImplementation(async (_cmd, _args, callOpts) => {
+      expect(callOpts?.signal).toBe(controller.signal)
+      return { status: 0, stdout: '{}\n200', stderr: '' }
+    })
+    const client = new JiraClient(creds, { spawn: mockSpawn })
+    await client.issue('DZ300-1', controller.signal)
+  })
 })
 
 // Helper: returns the mockSpawn fn, configured to resolve to a fake curl result.

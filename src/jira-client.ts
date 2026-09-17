@@ -20,6 +20,9 @@ export type SpawnFn = (
 
 export interface JiraClientOptions {
   spawn?: SpawnFn
+  defaultWorklogPageSize?: number
+  defaultSearchMaxResults?: number
+  defaultSearchFields?: string
 }
 
 const KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/
@@ -52,15 +55,19 @@ interface RawSearchPage {
   issues: Array<{ key: string; id: string; fields: Record<string, unknown> }>
 }
 
-type RawIssueFull = RawIssue
-
 export class JiraClient {
   private creds: ScjiraSettings
   private spawn: SpawnFn
+  private defaultWorklogPageSize: number
+  private defaultSearchMaxResults: number
+  private defaultSearchFields: string
 
   constructor(creds: ScjiraSettings, opts: JiraClientOptions = {}) {
     this.creds = creds
     this.spawn = opts.spawn ?? defaultSpawn
+    this.defaultWorklogPageSize = opts.defaultWorklogPageSize ?? 1000
+    this.defaultSearchMaxResults = opts.defaultSearchMaxResults ?? 50
+    this.defaultSearchFields = opts.defaultSearchFields ?? '*navigable'
   }
 
   private authHeader(): string {
@@ -109,14 +116,14 @@ export class JiraClient {
     }
   }
 
-  async issue(key: string, signal?: AbortSignal): Promise<JiraResult<RawIssueFull>> {
+  async issue(key: string, signal?: AbortSignal): Promise<JiraResult<RawIssue>> {
     if (!KEY_RE.test(key)) {
       return { ok: false, error: 'http', detail: 'invalid key format' }
     }
     const { status, body } = await this.curl(`${this.creds.server}/rest/api/2/issue/${key}`, signal)
     const bad = this.classify(status, body)
     if (bad) return bad
-    return this.tryParse<RawIssueFull>(body)
+    return this.tryParse<RawIssue>(body)
   }
 
   async worklogs(
@@ -127,9 +134,10 @@ export class JiraClient {
       return { ok: false, error: 'http', detail: 'invalid key format' }
     }
     const startAt = opts.startAt ?? 0
-    const maxResults = opts.maxResults ?? 1000
+    const maxResults = opts.maxResults ?? this.defaultWorklogPageSize
+    const params = new URLSearchParams({ startAt: String(startAt), maxResults: String(maxResults) })
     const { status, body } = await this.curl(
-      `${this.creds.server}/rest/api/2/issue/${key}/worklog?startAt=${startAt}&maxResults=${maxResults}`,
+      `${this.creds.server}/rest/api/2/issue/${key}/worklog?${params.toString()}`,
       opts.signal,
     )
     const bad = this.classify(status, body)
@@ -145,8 +153,8 @@ export class JiraClient {
   }): Promise<JiraResult<RawSearchPage>> {
     const params = new URLSearchParams()
     params.set('jql', opts.jql)
-    params.set('maxResults', String(opts.maxResults ?? 50))
-    params.set('fields', opts.fields ?? '*navigable')
+    params.set('maxResults', String(opts.maxResults ?? this.defaultSearchMaxResults))
+    params.set('fields', opts.fields ?? this.defaultSearchFields)
     const { status, body } = await this.curl(
       `${this.creds.server}/rest/api/2/search?${params.toString()}`,
       opts.signal,
