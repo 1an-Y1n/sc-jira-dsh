@@ -41,10 +41,12 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     displayName: Schema.string().default('Ian Yin'),
   })
 
-  const scope = ctx.settings.register('scjira', settingsSchema)
-
-  let creds: ScjiraSettings = scope.get()
-  ctx.effect(() => scope.watch(next => { creds = next }))
+  let creds: ScjiraSettings
+  ctx.effect(() => {
+    const scope = ctx.settings.register('scjira', settingsSchema)
+    creds = scope.get()
+    return scope.watch(next => { creds = next })
+  })
 
   // 2. Resolve spawn from ctx.subprocess (if available) or use Node fallback
   const spawn: SpawnFn = async (cmd, args, opts) => {
