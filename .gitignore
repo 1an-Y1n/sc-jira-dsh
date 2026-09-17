@@ -1,5 +1,5 @@
 node_modules/
-lib/
-client/
+/lib/
+/client/
 *.log
 .DS_Store
