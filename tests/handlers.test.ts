@@ -7,6 +7,8 @@ import {
   handleListWorklogWeek,
   handleGetBinding,
   handleBind,
+  searchAllIssues,
+  SEARCH_PAGE_SIZE,
 } from '../src/handlers.js'
 import type { ScjiraSettings } from '../src/types.js'
 
@@ -213,3 +215,134 @@ describe('handleGetBinding', () => {
     await rm(tasksDir, { recursive: true, force: true })
   })
 })
+
+// --- searchAllIssues (pagination) ------------------------------------------
+
+describe('searchAllIssues', () => {
+  it('stops after a single page when the total fits', async () => {
+    let callCount = 0
+    const jira = {
+      search: async () => {
+        callCount++
+        return {
+          ok: true,
+          body: {
+            startAt: 0, maxResults: 100, total: 3,
+            issues: [
+              { key: 'DZ300-1', id: '1', fields: {} },
+              { key: 'DZ300-2', id: '2', fields: {} },
+              { key: 'DZ300-3', id: '3', fields: {} },
+            ],
+          },
+        }
+      },
+    }
+    const r = await searchAllIssues(jira, { jql: 'x' })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.body).toHaveLength(3)
+    expect(callCount).toBe(1)
+  })
+
+  it('follows every page until the reported total is reached', async () => {
+    const seenStartAt: Array<number | undefined> = []
+    const jira = {
+      search: async (opts: { startAt?: number }) => {
+        seenStartAt.push(opts.startAt)
+        const offset = opts.startAt ?? 0
+        const total = 250
+        const size = Math.min(SEARCH_PAGE_SIZE, total - offset)
+        return {
+          ok: true,
+          body: {
+            startAt: offset, maxResults: SEARCH_PAGE_SIZE, total,
+            issues: Array.from({ length: size }, (_, i) => ({
+              key: `DZ300-${offset + i}`, id: String(offset + i), fields: {},
+            })),
+          },
+        }
+      },
+    }
+    const r = await searchAllIssues(jira, { jql: 'x' })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.body).toHaveLength(250)
+    // 3 pages: 100 + 100 + 50
+    expect(seenStartAt).toEqual([0, 100, 200])
+  })
+
+  it('stops on an empty page even when the total claims more', async () => {
+    let callCount = 0
+    const jira = {
+      search: async () => {
+        callCount++
+        return { ok: true, body: { startAt: 0, maxResults: 100, total: 999, issues: [] } }
+      },
+    }
+    const r = await searchAllIssues(jira, { jql: 'x' })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.body).toHaveLength(0)
+    expect(callCount).toBe(1)
+  })
+
+  it('surfaces the error when the first page fails', async () => {
+    const jira = { search: async () => ({ ok: false, error: 'network' }) }
+    const r = await searchAllIssues(jira, { jql: 'x' })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('network')
+  })
+
+  it('keeps the pages already gathered when a later page fails', async () => {
+    let callCount = 0
+    const jira = {
+      search: async () => {
+        callCount++
+        if (callCount === 1) {
+          return {
+            ok: true,
+            body: {
+              startAt: 0, maxResults: 100, total: 200,
+              issues: [{ key: 'DZ300-1', id: '1', fields: {} }],
+            },
+          }
+        }
+        return { ok: false, error: 'network' }
+      },
+    }
+    const r = await searchAllIssues(jira, { jql: 'x' })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.body).toHaveLength(1)
+  })
+})
+
+// --- listMyOpen pagination -------------------------------------------------
+
+describe('handleListMyOpen pagination', () => {
+  it('returns issues beyond the first page (no silent truncation)', async () => {
+    let callCount = 0
+    const jira = makeFakeJiraClient({
+      search: async (opts: any) => {
+        callCount++
+        const offset = opts?.startAt ?? 0
+        const total = 150
+        const size = Math.min(SEARCH_PAGE_SIZE, total - offset)
+        return {
+          ok: true,
+          body: {
+            startAt: offset, maxResults: SEARCH_PAGE_SIZE, total,
+            issues: Array.from({ length: size }, (_, i) => ({
+              key: `DZ300-${offset + i}`, id: String(offset + i),
+              fields: { summary: `Issue ${offset + i}`, timespent: 60 },
+            })),
+          },
+        }
+      },
+    })
+    const r = await handleListMyOpen({ jira, creds })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.issues).toHaveLength(150)
+      expect(r.totalSpentSeconds).toBe(150 * 60)
+    }
+    expect(callCount).toBe(2)
+  })
+})
+

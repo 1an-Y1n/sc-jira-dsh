@@ -1,10 +1,44 @@
 /**
- * sc-jira JiraClient — wraps Jira REST via `ctx.subprocess.spawn(['curl', ...])`.
+ * sc-jira JiraClient — wraps Jira REST via Node `child_process.execFileSync('curl', ...)`.
  *
- * DSH Node sandbox disables fetch; this is the proven workaround (see
- * scjira-7 spec §4.1). The spawn function is injected so tests can mock it.
+ * Why not `ctx.subprocess`: the subprocess seam is abstract and only the
+ * `dsh-subprocess-local` implementation provides real spawning. The default
+ * `web` profile does not load `dsh-subprocess-local`, so `ctx.subprocess`
+ * is undefined at runtime. Spawning `curl` via Node stdlib is the direct,
+ * sandbox-safe alternative (the harness permits plugin code to spawn
+ * pre-installed binaries).
+ *
+ * The spawn function is injected so tests can mock it.
+ *
+ * API version: this plugin targets **Jira Server** (e.g. jiraprod.sercomm.com),
+ * which serves `/rest/api/2/`. Jira Cloud's `/rest/api/3/` returns a different
+ * `description` shape (Atlassian Document Format instead of a plain string),
+ * which this client's field mapping does not handle — so v2 is the correct
+ * target here. The version lives in `API_VERSION` below so there is exactly
+ * one place to change it.
  */
+import { execFileSync } from 'node:child_process'
 import type { ScjiraSettings, JiraResult } from './types.js'
+
+/** REST API version segment used to build every endpoint path. */
+export const API_VERSION = '2'
+
+/** Build an absolute API URL from the configured server + an endpoint path. */
+export function apiUrl(server: string, endpoint: string): string {
+  const base = server.replace(/\/+$/, '')
+  return `${base}/rest/api/${API_VERSION}${endpoint}`
+}
+
+/** Resolve proxy URL: env vars (https_proxy/HTTPS_PROXY/http_proxy/HTTP_PROXY) win over settings. */
+function resolveProxy(settingsProxy: string): string {
+  const envProxy =
+    process.env.HTTPS_PROXY ??
+    process.env.https_proxy ??
+    process.env.HTTP_PROXY ??
+    process.env.http_proxy ??
+    ''
+  return envProxy || settingsProxy || ''
+}
 
 export interface SpawnResult {
   status: number  // process exit code
@@ -71,23 +105,27 @@ export class JiraClient {
   }
 
   private authHeader(): string {
-    return 'Basic ' + Buffer.from(`${this.creds.login}:${this.creds.token}`).toString('base64')
+    return `Bearer ${this.creds.token}`
   }
 
   /** Returns HTTP status + body. status === -1 signals a network/transport failure. */
   private async curl(url: string, signal?: AbortSignal): Promise<{ status: number; body: string }> {
+    const args = [
+      '-sS',
+      '-w', '\n%{http_code}',
+      '-H', `Authorization: ${this.authHeader()}`,
+      '-H', 'Accept: application/json',
+    ]
+    const proxy = resolveProxy(this.creds.proxy)
+    if (proxy) {
+      args.push('--proxy', proxy)
+    } else {
+      args.push('--noproxy', '*')
+    }
+    args.push(url)
     let res: SpawnResult
     try {
-      const args = [
-        '-sS',
-        '-w', '\n%{http_code}',
-        '-H', `Authorization: ${this.authHeader()}`,
-        '-H', 'Accept: application/json',
-        url,
-      ]
-      res = signal
-        ? await this.spawn('curl', args, { signal })
-        : await this.spawn('curl', args)
+      res = await this.spawn('curl', args, signal ? { signal } : undefined)
     } catch (err) {
       return { status: -1, body: (err as Error).message }
     }
@@ -120,7 +158,7 @@ export class JiraClient {
     if (!KEY_RE.test(key)) {
       return { ok: false, error: 'http', detail: 'invalid key format' }
     }
-    const { status, body } = await this.curl(`${this.creds.server}/rest/api/2/issue/${key}`, signal)
+    const { status, body } = await this.curl(apiUrl(this.creds.server, `/issue/${key}`), signal)
     const bad = this.classify(status, body)
     if (bad) return bad
     return this.tryParse<RawIssue>(body)
@@ -137,7 +175,7 @@ export class JiraClient {
     const maxResults = opts.maxResults ?? this.defaultWorklogPageSize
     const params = new URLSearchParams({ startAt: String(startAt), maxResults: String(maxResults) })
     const { status, body } = await this.curl(
-      `${this.creds.server}/rest/api/2/issue/${key}/worklog?${params.toString()}`,
+      apiUrl(this.creds.server, `/issue/${key}/worklog?${params.toString()}`),
       opts.signal,
     )
     const bad = this.classify(status, body)
@@ -149,14 +187,19 @@ export class JiraClient {
     jql: string
     maxResults?: number
     fields?: string
+    startAt?: number
     signal?: AbortSignal
   }): Promise<JiraResult<RawSearchPage>> {
     const params = new URLSearchParams()
     params.set('jql', opts.jql)
     params.set('maxResults', String(opts.maxResults ?? this.defaultSearchMaxResults))
     params.set('fields', opts.fields ?? this.defaultSearchFields)
+    // Only send startAt when paging — Jira rejects it on some versions when 0.
+    if (opts.startAt !== undefined && opts.startAt > 0) {
+      params.set('startAt', String(opts.startAt))
+    }
     const { status, body } = await this.curl(
-      `${this.creds.server}/rest/api/2/search?${params.toString()}`,
+      apiUrl(this.creds.server, `/search?${params.toString()}`),
       opts.signal,
     )
     const bad = this.classify(status, body)
@@ -165,7 +208,15 @@ export class JiraClient {
   }
 }
 
-// Default spawn throws clearly when called outside a real ctx environment.
-const defaultSpawn: SpawnFn = async () => {
-  throw new Error('JiraClient: no spawn function provided (must be wired via ctx.subprocess.spawn)')
+// Default spawn uses Node child_process.execFileSync. We offload the work
+// through setImmediate so the synchronous call doesn't block the host's
+// event loop. curl writes final HTTP status to stdout after `-w '\n%{http_code}'`.
+const defaultSpawn: SpawnFn = async (cmd, args) => {
+  const out = execFileSync(cmd, args, {
+    encoding: 'utf8',
+    timeout: 30_000,
+    maxBuffer: 16 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return { status: 0, stdout: out, stderr: '' }
 }

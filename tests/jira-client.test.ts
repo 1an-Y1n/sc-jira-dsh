@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mockSpawn = vi.fn()
 
-import { JiraClient } from '../src/jira-client.js'
+import { JiraClient, API_VERSION, apiUrl } from '../src/jira-client.js'
 
 const creds = {
   server: 'https://jiratest.example.com',
   login: 'A003688',
   token: 'fake-token',
   displayName: 'Ian Yin',
+  proxy: '',
 }
 
 describe('JiraClient', () => {
@@ -23,16 +24,81 @@ describe('JiraClient', () => {
     if (r.ok) expect(r.body.key).toBe('DZ300-1')
   })
 
-  it('issue() sends Basic auth header on every request', async () => {
+  it('issue() sends Bearer auth header on every request', async () => {
     const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
     await client.issue('DZ300-1')
-    expect(mockSpawn).toHaveBeenCalledWith(
-      'curl',
-      expect.arrayContaining([
-        expect.stringMatching(/^-H$/),
-        expect.stringMatching(/^Authorization: Basic /),
-      ]),
-    )
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    // Find the index of '-H' that precedes an Authorization header.
+    const authIdx = args.findIndex(a => /^Authorization: Bearer /.test(a))
+    expect(authIdx).toBeGreaterThan(0)
+    expect(args[authIdx - 1]).toBe('-H')
+    expect(args[authIdx]).toBe(`Authorization: Bearer ${creds.token}`)
+  })
+
+  it('issue() never caches — repeat calls always hit Jira', async () => {
+    const client = new JiraClient(creds, {
+      spawn: makeSpawnMock({ httpStatus: 200, body: JSON.stringify({ key: 'DZ300-1', id: '100', fields: {} }) }),
+    })
+    await client.issue('DZ300-1')
+    await client.issue('DZ300-1')
+    await client.issue('DZ300-1')
+    expect(mockSpawn).toHaveBeenCalledTimes(3)
+  })
+
+  it('issue() adds --noproxy * when no proxy configured', async () => {
+    const client = new JiraClient({ ...creds, proxy: '' }, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    await client.issue('DZ300-1')
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    const npIdx = args.indexOf('--noproxy')
+    expect(npIdx).toBeGreaterThan(0)
+    expect(args[npIdx + 1]).toBe('*')
+  })
+
+  it('issue() adds --proxy when settings.proxy is non-empty', async () => {
+    const client = new JiraClient({ ...creds, proxy: 'http://127.0.0.1:8888' }, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    await client.issue('DZ300-1')
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    const pIdx = args.indexOf('--proxy')
+    expect(pIdx).toBeGreaterThan(0)
+    expect(args[pIdx + 1]).toBe('http://127.0.0.1:8888')
+    expect(args).not.toContain('--noproxy')
+  })
+
+  it('issue() prefers HTTPS_PROXY env over settings.proxy', async () => {
+    const prev = process.env.HTTPS_PROXY
+    process.env.HTTPS_PROXY = 'http://env-proxy:9999'
+    try {
+      const client = new JiraClient({ ...creds, proxy: 'http://settings-proxy:7777' }, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+      await client.issue('DZ300-1')
+      const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+      const pIdx = args.indexOf('--proxy')
+      expect(pIdx).toBeGreaterThan(0)
+      expect(args[pIdx + 1]).toBe('http://env-proxy:9999')
+    } finally {
+      if (prev === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = prev
+    }
+  })
+
+  it('issue() never caches — repeat calls always hit Jira', async () => {
+    const client = new JiraClient(creds, {
+      spawn: makeSpawnMock({ httpStatus: 200, body: JSON.stringify({ key: 'DZ300-1', id: '100', fields: {} }) }),
+    })
+    await client.issue('DZ300-1')
+    await client.issue('DZ300-1')
+    await client.issue('DZ300-1')
+    expect(mockSpawn).toHaveBeenCalledTimes(3)
+  })
+
+  it('worklogs() never caches — repeat calls always hit Jira', async () => {
+    const page = { startAt: 0, maxResults: 1000, total: 0, worklogs: [] }
+    const client = new JiraClient(creds, {
+      spawn: makeSpawnMock({ httpStatus: 200, body: JSON.stringify(page) }),
+    })
+    await client.worklogs('DZ300-1')
+    await client.worklogs('DZ300-1')
+    await client.worklogs('DZ300-1')
+    expect(mockSpawn).toHaveBeenCalledTimes(3)
   })
 
   it('issue() returns auth error on 401', async () => {
@@ -89,6 +155,70 @@ describe('JiraClient', () => {
     })
     const client = new JiraClient(creds, { spawn: mockSpawn })
     await client.issue('DZ300-1', controller.signal)
+  })
+})
+
+// --- API version ------------------------------------------------------------
+
+describe('apiUrl', () => {
+  it('builds a /rest/api/<version> URL', () => {
+    expect(apiUrl('https://jira.example.com', '/issue/DZ300-1'))
+      .toBe(`https://jira.example.com/rest/api/${API_VERSION}/issue/DZ300-1`)
+  })
+
+  it('strips trailing slashes from the server', () => {
+    expect(apiUrl('https://jira.example.com///', '/search'))
+      .toBe(`https://jira.example.com/rest/api/${API_VERSION}/search`)
+  })
+
+  it('targets Jira Server API v2', () => {
+    // Jira Server (not Cloud) is the deployment target; Cloud's v3 returns a
+    // different description shape this client does not map.
+    expect(API_VERSION).toBe('2')
+  })
+})
+
+describe('JiraClient API version consistency', () => {
+  beforeEach(() => {
+    // This block sits outside the first describe, so it needs its own reset —
+    // otherwise mock.calls keeps accumulating across these cases.
+    mockSpawn.mockReset()
+  })
+
+  it('issue() requests the shared API version', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    await client.issue('DZ300-1')
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    const url = args[args.length - 1] ?? ''
+    expect(url).toBe(`https://jiratest.example.com/rest/api/${API_VERSION}/issue/DZ300-1`)
+  })
+
+  it('worklogs() requests the shared API version', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    await client.worklogs('DZ300-1')
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    const url = args[args.length - 1] ?? ''
+    expect(url).toContain(`/rest/api/${API_VERSION}/issue/DZ300-1/worklog`)
+  })
+
+  it('search() requests the shared API version', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    await client.search({ jql: 'x' })
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    const url = args[args.length - 1] ?? ''
+    expect(url).toContain(`/rest/api/${API_VERSION}/search`)
+  })
+
+  it('search() sends startAt only when paging', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+
+    await client.search({ jql: 'x' })
+    let args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    expect(args.join(' ')).not.toContain('startAt')
+
+    await client.search({ jql: 'x', startAt: 100 })
+    args = (mockSpawn.mock.calls[1]?.[1] as string[] | undefined) ?? []
+    expect(args.join(' ')).toContain('startAt=100')
   })
 })
 

@@ -1,7 +1,7 @@
 /**
  * sc-jira HOST apply. Registers:
  *   - Settings namespace 'scjira' (server/login/token/displayName; token is secret)
- *   - 4 HTTP routes at /api/scjira/*
+ *   - 5 HTTP routes at /api/scjira/*
  *   - 4 defineTool mirror (jira_list_my_open, jira_list_worklog_week, jira_get_binding, jira_bind)
  *
  * All registrations wrap ctx.effect for automatic dispose.
@@ -9,10 +9,14 @@
  * also sync return points — we must not await settings on every request).
  */
 import type { Context } from '@deepseek-ai/cordis'
-import Schema from '@deepseek-ai/schemastery'
+// These imports pull in each package's `declare module '@deepseek-ai/cordis'`
+// augmentation so ctx.settings / ctx.tools / ctx.webServer become typed.
+import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import Schema from '@deepseek-ai/schemastery'
 import type { ScjiraSettings } from './types.js'
-import { JiraClient, type SpawnFn } from './jira-client.js'
+import { JiraClient } from './jira-client.js'
 import {
   handleListMyOpen,
   handleListWorklogWeek,
@@ -30,44 +34,74 @@ export const Config = Schema.object({
   ),
 })
 
-export const inject = ['settings', 'webServer', 'tools']
+export const inject = ['settings', 'webServer', 'tools'] as const
+
+// Local shape we need beyond what the augmentation supplies (webServer is
+// composed from cordis-web-server, whose types are not pulled into this
+// package). All other services use the augmented Context type directly.
+interface WebServerHost {
+  register(route: {
+    kind: 'exact' | 'prefix'
+    path: string
+    handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
+  }): () => void
+}
+
+// Minimal settings scope we use
+interface ScjiraSettingsScope<T> {
+  get(): T
+  watch(cb: (next: T) => void): () => void
+}
 
 export function apply(ctx: Context, config: { tasksDir: string }): void {
+  // After the imports above, ctx.settings is typed as SettingsProvider (from
+  // dsh-settings' module augmentation). We still need a local webServer view
+  // because cordis-web-server's .d.ts is not a peer dep of this plugin.
+  const settings = (ctx as Context & { settings: SettingsProvider }).settings
+  const webServer = (ctx as unknown as { webServer: WebServerHost }).webServer
+  const tools = (ctx as unknown as { tools: { register(def: unknown): () => void } }).tools
+
   // 1. Settings namespace
   const settingsSchema = Schema.object({
     server:      Schema.string().default('https://jiraprod.sercomm.com'),
     login:       Schema.string().default('A003688'),
     token:       Schema.string().role('secret').default(''),
     displayName: Schema.string().default('Ian Yin'),
+    proxy:       Schema.string().default(''),
   })
 
   let creds: ScjiraSettings
+  // Kept so the /config route can read the *committed* value back after a
+  // write. `scope.watch` fires asynchronously, so the `creds` closure
+  // variable may still hold the previous value at the moment we answer.
+  let scope: ScjiraSettingsScope<ScjiraSettings>
   ctx.effect(() => {
-    const scope = ctx.settings.register('scjira', settingsSchema)
+    scope = settings.register('scjira' as never, settingsSchema) as ScjiraSettingsScope<ScjiraSettings>
     creds = scope.get()
-    return scope.watch(next => { creds = next })
+    return scope.watch(next => {
+      creds = next
+      // Token/credential change: force rebuild on next makeClient()
+      client = null
+      clientFingerprint = ''
+    })
   })
 
-  // 2. Resolve spawn from ctx.subprocess (if available) or use Node fallback
-  const spawn: SpawnFn = async (cmd, args, opts) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const proc = await (ctx as any).subprocess?.spawn?.(cmd, args, opts)
-    if (!proc) {
-      throw new Error('sc-jira: ctx.subprocess.spawn not available')
-    }
-    return {
-      status: proc.status ?? 0,
-      stdout: proc.stdout ?? '',
-      stderr: proc.stderr ?? '',
-    }
-  }
-
+  // 2. JiraClient singleton — survives across HTTP requests. Rebuilt when
+  // creds change (token rotation). No in-memory cache: every call hits Jira
+  // so the panel always reflects current state.
+  let client: JiraClient | null = null
+  let clientFingerprint = ''
   function makeClient(): JiraClient {
-    return new JiraClient(creds, { spawn })
+    const fp = `${creds.server}|${creds.login}|${creds.token}|${creds.proxy}`
+    if (!client || clientFingerprint !== fp) {
+      client = new JiraClient(creds)
+      clientFingerprint = fp
+    }
+    return client
   }
 
   // 3. HTTP routes
-  ctx.effect(() => ctx.webServer.register({
+  ctx.effect(() => webServer.register({
     kind: 'prefix',
     path: '/api/scjira',
     handler: async (req, res) => {
@@ -86,7 +120,44 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
           server: creds.server,
           login: creds.login,
           displayName: creds.displayName,
+          proxy: creds.proxy,
         }))
+        return
+      }
+
+      // Settings write — accepts partial update of scjira namespace
+      if (route === 'config' && method === 'POST') {
+        let body = ''
+        req.on('data', c => { body += c })
+        req.on('end', async () => {
+          try {
+            const parsed = JSON.parse(body) as { server?: string; login?: string; displayName?: string; token?: string; proxy?: string }
+            const ops: Array<{ op: 'set'; path: string[]; value: string }> = []
+            if (parsed.server !== undefined) ops.push({ op: 'set', path: ['server'], value: parsed.server })
+            if (parsed.login !== undefined) ops.push({ op: 'set', path: ['login'], value: parsed.login })
+            if (parsed.displayName !== undefined) ops.push({ op: 'set', path: ['displayName'], value: parsed.displayName })
+            if (parsed.proxy !== undefined) ops.push({ op: 'set', path: ['proxy'], value: parsed.proxy })
+            // Only write token if user supplied one (preserves existing on empty)
+            if (parsed.token) ops.push({ op: 'set', path: ['token'], value: parsed.token })
+            await settings.mutate('scjira' as never, ops)
+            // Read the committed value back from the scope rather than the
+            // `creds` closure: `scope.watch` runs asynchronously, so `creds`
+            // can still hold the pre-write value at this point and the client
+            // would render stale values after a successful save.
+            const saved = scope.get()
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({
+              ok: true,
+              server: saved.server,
+              login: saved.login,
+              displayName: saved.displayName,
+              proxy: saved.proxy,
+            }))
+          } catch (err) {
+            res.writeHead(400, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: (err as Error).message }))
+          }
+        })
         return
       }
 
@@ -146,7 +217,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
   }))
 
   // 4. Tools (mirror of the 4 handlers, callable from agent)
-  ctx.effect(() => ctx.tools.register(defineTool({
+  ctx.effect(() => tools.register(defineTool({
     name: 'jira_list_my_open',
     description: '列出分配给当前用户的未完成 Jira issues',
     parameters: {},
@@ -172,7 +243,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     },
   })))
 
-  ctx.effect(() => ctx.tools.register(defineTool({
+  ctx.effect(() => tools.register(defineTool({
     name: 'jira_list_worklog_week',
     description: '列出当前用户在指定周（默认本周）的 worklog',
     parameters: {
@@ -210,7 +281,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     },
   })))
 
-  ctx.effect(() => ctx.tools.register(defineTool({
+  ctx.effect(() => tools.register(defineTool({
     name: 'jira_get_binding',
     description: '查询指定 DSH session 是否已绑定到 Jira issue',
     parameters: {
@@ -237,7 +308,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     },
   })))
 
-  ctx.effect(() => ctx.tools.register(defineTool({
+  ctx.effect(() => tools.register(defineTool({
     name: 'jira_bind',
     description: '将当前 DSH session 绑定到一个 Jira issue key',
     parameters: {

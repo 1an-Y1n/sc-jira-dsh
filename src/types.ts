@@ -48,6 +48,7 @@ export interface ScjiraSettings {
   login: string
   token: string
   displayName: string
+  proxy: string  // optional; env var HTTPS_PROXY/HTTP_PROXY takes precedence
 }
 
 export interface MetaJsonV3 {
