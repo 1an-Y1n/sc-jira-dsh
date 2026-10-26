@@ -31,8 +31,9 @@ automatically, so this package ships a `prepare` script that pnpm runs after the
 The build is self-contained: it needs only this directory, no sibling monorepo checkout.
 
 pnpm ≥10 refuses to run a git dependency's `prepare` script until it is explicitly allowed,
-so the **first** `add` fails with a message naming the package. Copy that key into the
-profile's `pnpm-workspace.yaml`:
+so the **first** `add` fails. Copy the key pnpm prints into the profile's
+`pnpm-workspace.yaml` — the key names the exact tarball and commit, so it changes when the
+commit changes:
 
 ```yaml
 # ~/.dsh/profiles/web/pnpm-workspace.yaml
@@ -43,10 +44,10 @@ nodeLinker: hoisted
 autoInstallPeers: false
 
 allowBuilds:
-  '@ian/sc-jira': true
+  '@ian/sc-jira@https://codeload.github.com/1an-Y1n/sc-jira-dsh/tar.gz/<commit-sha>': true
 ```
 
-then re-run the `add`.
+then re-run the `add`. The build then runs automatically and the install completes.
 
 > Allowing a build is **permission to execute the package's code on your machine at install
 > time**, outside any sandbox the agent runs under. Only allow packages whose source you
@@ -56,6 +57,23 @@ then re-run the `add`.
 Only `esbuild` needs a build allowance, and it comes in as a transitive dependency of
 **vitest** — the test runner, not the build. The client bundle is built by `rolldown`, which
 ships prebuilt native bindings and needs no allowance.
+
+### Requirements
+
+The plugin injects `settings`, `webServer` and `tools`, so the profile must mount the web
+app bundle:
+
+```yaml
+dsh:
+  profile:
+    bundles:
+      - '@deepseek-ai/dsh-base'
+      - '@deepseek-ai/dsh-web-app'
+      - '@ian/sc-jira'
+```
+
+Without `dsh-web-app` the entry stays `pending (waiting for service: webServer)` and the
+profile refuses to boot.
 
 ### From a local checkout
 
