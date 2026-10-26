@@ -20,6 +20,9 @@ The original spec called for 3 right-sidebar sub-tabs, but `@deepseek-ai/dsh-cli
 
 ## Install
 
+> **Want it live without restarting?** Installing through the **plugin market** hot-mounts the
+> plugin into the running host — see [Installing without a restart](#installing-without-a-restart-via-the-plugin-market).
+
 ### From GitHub (recommended for other users)
 
 ```bash
@@ -74,6 +77,44 @@ dsh:
 
 Without `dsh-web-app` the entry stays `pending (waiting for service: webServer)` and the
 profile refuses to boot.
+
+### Installing without a restart (via the plugin market)
+
+`dsh plugin add` changes the profile manifest on disk; a running DSH keeps the bundle set it
+started with, so a plain install needs a restart.
+
+The **plugin market** (`dshmarket`) can do better: it mounts a freshly installed plugin into
+the *running* composition through a market-owned Include subtree, so the plugin is live
+immediately — no restart. `sc-jira` is compatible with that path.
+
+The compatibility requirement is narrow: the bundle patch must contain **only plain
+`id`/`name` insert rows** — no `config` blocks, no `disables`, no `!!js` expressions. The
+market's parser rejects anything else and falls back to a restart. This package's patch
+already satisfies it:
+
+```yaml
+- insert:
+    - id: sc-jira
+      name: '@ian/sc-jira'
+```
+
+Verified against the installed market's own parser (`parseSimplePatch` returns
+`[{ id: 'sc-jira', name: '@ian/sc-jira' }]`) and by a live hot-mount: with the plugin
+deliberately kept out of `dsh.profile.bundles`, `POST /dsh-market/toggle` returned
+`"state": "live"`, `"hot": true`, `"restart": false`, and the routes went from `404` to
+`200` on the same process.
+
+Two caveats worth knowing:
+
+- The market's hot-mount writes a **temporary** row under `<profile>/.dsh-market/`, wiped on
+  every boot. Durable state stays with `dsh.profile.bundles`, reconciled by the `dsh` CLI at
+  install time — so the next boot loads the plugin through the normal bundle layer.
+- A hot mount is **process-local**. The plugin's own state (the `scjira` settings namespace,
+  the `meta.json` bindings) lives outside the process and survives either way.
+
+If the hot mount cannot complete — the plugin takes longer than 10s to activate, the include
+plugin is unavailable, or the patch grows a config row — the market falls back to restarting
+the host itself and says so.
 
 ### From a local checkout
 
