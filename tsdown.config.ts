@@ -1,15 +1,17 @@
 import { defineConfig } from 'tsdown'
 
 export default defineConfig({
-  entry: ['src/client/index.ts'],
+  entry: { 'client': 'src/client/index.ts' },
   outDir: 'client',
-  format: ['esm'],
+  format: ['cjs'],
   clean: true,
   target: 'es2022',
   platform: 'browser',
   external: [
     'react',
     'react-dom',
+    'react/jsx-runtime',
+    'react/jsx-dev-runtime',
     '@deepseek-ai/cordis',
     '@deepseek-ai/dsh-client-locale',
     '@deepseek-ai/dsh-client-ui-sidebar-right',

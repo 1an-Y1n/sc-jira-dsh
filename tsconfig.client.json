@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "jsx": "react",
     "outDir": "client",
-    "rootDir": "src/client",
+    "rootDir": "src",
     "declaration": false,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": [],
