@@ -23,6 +23,32 @@ import type { ScjiraSettings, JiraResult } from './types.js'
 /** REST API version segment used to build every endpoint path. */
 export const API_VERSION = '2'
 
+/**
+ * Format a duration in seconds as a Jira duration string.
+ *
+ * Jira's `timeSpent` field takes a human string — `"45m"`, `"1h 30m"`,
+ * `"2d"` — and rejects the numeric `timeSpentSeconds` field with 400.
+ * Verified against the live server: `{"timeSpentSeconds":1}` → 400,
+ * `{"timeSpent":"1m"}` → 201.
+ *
+ * Jira's grammar is `<w>w <d>d <h>h <m>m <s>s`, with the largest unit first
+ * and at most one of each. We emit hours, minutes and seconds only: weeks and
+ * days are legal but a worklog never spans them, and keeping the output small
+ * keeps it readable in the Jira UI.
+ */
+export function formatDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.round(totalSeconds))
+  if (seconds === 0) return '0m'
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const rest = seconds % 60
+  const parts: string[] = []
+  if (hours > 0) parts.push(`${hours}h`)
+  if (minutes > 0) parts.push(`${minutes}m`)
+  if (rest > 0) parts.push(`${rest}s`)
+  return parts.join(' ')
+}
+
 /** Build an absolute API URL from the configured server + an endpoint path. */
 export function apiUrl(server: string, endpoint: string): string {
   const base = server.replace(/\/+$/, '')
@@ -109,13 +135,23 @@ export class JiraClient {
   }
 
   /** Returns HTTP status + body. status === -1 signals a network/transport failure. */
-  private async curl(url: string, signal?: AbortSignal): Promise<{ status: number; body: string }> {
+  private async curl(
+    url: string,
+    signal?: AbortSignal,
+    init?: { method?: string; body?: unknown },
+  ): Promise<{ status: number; body: string }> {
+    const method = init?.method ?? 'GET'
     const args = [
       '-sS',
+      '-X', method,
       '-w', '\n%{http_code}',
       '-H', `Authorization: ${this.authHeader()}`,
       '-H', 'Accept: application/json',
     ]
+    if (init?.body !== undefined) {
+      args.push('-H', 'Content-Type: application/json')
+      args.push('--data-binary', JSON.stringify(init.body))
+    }
     const proxy = resolveProxy(this.creds.proxy)
     if (proxy) {
       args.push('--proxy', proxy)
@@ -205,6 +241,111 @@ export class JiraClient {
     const bad = this.classify(status, body)
     if (bad) return bad
     return this.tryParse<RawSearchPage>(body)
+  }
+
+  // --- worklog writes ------------------------------------------------------
+  //
+  // Jira Server's worklog API:
+  //   POST   /rest/api/2/issue/{key}/worklog          → 201, body = the worklog
+  //   PUT    /rest/api/2/issue/{key}/worklog/{id}     → 200, body = the worklog
+  //   DELETE /rest/api/2/issue/{key}/worklog/{id}     → 204, empty body
+  //
+  // The write body takes `timeSpent` (a Jira duration string) and optionally
+  // `started` and `comment`. `adjustEstimate` is NOT accepted on this Jira
+  // version and the `/adjustment` endpoint does not exist, so no estimate
+  // linkage is attempted.
+
+  /**
+   * Add a worklog entry to an issue.
+   * @param key - issue key, e.g. `DZ300-797`.
+   * @param opts.seconds - duration in seconds; sent as a Jira duration string.
+   * @param opts.comment - worklog comment.
+   * @param opts.started - ISO timestamp with offset, e.g. `2026-10-26T09:00:00.000+0800`.
+   * @returns the created worklog, or the failure kind.
+   */
+  async addWorklog(
+    key: string,
+    opts: { seconds: number; comment?: string; started?: string; signal?: AbortSignal },
+  ): Promise<JiraResult<RawWorklog>> {
+    if (!KEY_RE.test(key)) {
+      return { ok: false, error: 'http', detail: 'invalid key format' }
+    }
+    const payload: Record<string, unknown> = { timeSpent: formatDuration(opts.seconds) }
+    if (opts.comment !== undefined && opts.comment !== '') payload.comment = opts.comment
+    if (opts.started !== undefined && opts.started !== '') payload.started = opts.started
+    const { status, body } = await this.curl(
+      apiUrl(this.creds.server, `/issue/${key}/worklog`),
+      opts.signal,
+      { method: 'POST', body: payload },
+    )
+    const bad = this.classify(status, body)
+    if (bad) return bad
+    return this.tryParse<RawWorklog>(body)
+  }
+
+  /**
+   * Update an existing worklog entry — used when the user edits a duration or
+   * a start time that has already been synced to Jira.
+   * @param key - issue key.
+   * @param worklogId - the Jira worklog id.
+   * @param opts.seconds - new duration in seconds; omit to keep the current one.
+   * @param opts.comment - new comment; omit to keep the current one.
+   * @param opts.started - new start timestamp; omit to keep the current one.
+   * @returns the updated worklog, or the failure kind.
+   */
+  async updateWorklog(
+    key: string,
+    worklogId: string,
+    opts: { seconds?: number; comment?: string; started?: string; signal?: AbortSignal },
+  ): Promise<JiraResult<RawWorklog>> {
+    if (!KEY_RE.test(key)) {
+      return { ok: false, error: 'http', detail: 'invalid key format' }
+    }
+    if (!/^\d+$/.test(worklogId)) {
+      return { ok: false, error: 'http', detail: 'invalid worklog id' }
+    }
+    const payload: Record<string, unknown> = {}
+    if (opts.seconds !== undefined) payload.timeSpent = formatDuration(opts.seconds)
+    if (opts.comment !== undefined) payload.comment = opts.comment
+    if (opts.started !== undefined && opts.started !== '') payload.started = opts.started
+    if (Object.keys(payload).length === 0) {
+      return { ok: false, error: 'http', detail: 'nothing to update' }
+    }
+    const { status, body } = await this.curl(
+      apiUrl(this.creds.server, `/issue/${key}/worklog/${worklogId}`),
+      opts.signal,
+      { method: 'PUT', body: payload },
+    )
+    const bad = this.classify(status, body)
+    if (bad) return bad
+    return this.tryParse<RawWorklog>(body)
+  }
+
+  /**
+   * Delete a worklog entry.
+   * @param key - issue key.
+   * @param worklogId - the Jira worklog id.
+   * @returns ok on 204 (or any 2xx), or the failure kind.
+   */
+  async deleteWorklog(
+    key: string,
+    worklogId: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<JiraResult<null>> {
+    if (!KEY_RE.test(key)) {
+      return { ok: false, error: 'http', detail: 'invalid key format' }
+    }
+    if (!/^\d+$/.test(worklogId)) {
+      return { ok: false, error: 'http', detail: 'invalid worklog id' }
+    }
+    const { status, body } = await this.curl(
+      apiUrl(this.creds.server, `/issue/${key}/worklog/${worklogId}`),
+      opts.signal,
+      { method: 'DELETE' },
+    )
+    const bad = this.classify(status, body)
+    if (bad) return bad
+    return { ok: true, body: null }
   }
 }
 
