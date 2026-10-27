@@ -1,2 +1,12 @@
+# The plugin builds with the same toolchain the profile uses.
+#
+# autoInstallPeers is off on purpose: `@deepseek-ai/dsh-llm` is a peer that
+# the HOST provides at runtime (its own `dsh-invariants` peer was never
+# published to npm), and pnpm trying to satisfy that chain from the registry
+# fails the install. The host's module-fallback machinery makes the peer
+# importable at runtime — the same way `dsh-tool-cordis` and
+# `dsh-repeat-tool-reminder` consume `dsh-llm` and `dsh-agent`.
 allowBuilds:
   esbuild: true
+
+autoInstallPeers: false

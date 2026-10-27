@@ -49,7 +49,28 @@ export interface ScjiraSettings {
   token: string
   displayName: string
   proxy: string  // optional; env var HTTPS_PROXY/HTTP_PROXY takes precedence
+  /**
+   * How a bound session's Jira scope is enforced.
+   *
+   * `advisory` — the model is told which issue the session is on and is
+   * warned when it reaches for another one; nothing is blocked. This is the
+   * default: a hard stop can trap an agent that legitimately needs to look
+   * at a neighbouring issue to finish the work.
+   *
+   * `narrow` — a tool call that names another issue is refused with a reason.
+   */
+  scopeMode: ScopeMode
 }
+
+/**
+ * How strongly a session's Jira scope is enforced.
+ *
+ * `advisory` warns; `narrow` refuses.
+ */
+export type ScopeMode = 'advisory' | 'narrow'
+
+/** Default scope mode. */
+export const DEFAULT_SCOPE_MODE: ScopeMode = 'advisory'
 
 export interface MetaJsonV3 {
   schemaVersion: 3

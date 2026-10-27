@@ -13,9 +13,18 @@ import type { Context } from '@deepseek-ai/cordis'
 // augmentation so ctx.settings / ctx.tools / ctx.webServer become typed.
 import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+// A VALUE import, not a type-only one: `dsh-agent` carries the `declare
+// module '@deepseek-ai/cordis'` augmentation that declares `agent/pre-step`
+// on the Events map, and a type-only import is elided — the augmentation
+// would never load and `ctx.on('agent/pre-step', …)` would not typecheck.
+import '@deepseek-ai/dsh-agent'
+import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { PostToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import Schema from '@deepseek-ai/schemastery'
 import type { ScjiraSettings } from './types.js'
+import { DEFAULT_SCOPE_MODE } from './types.js'
 import { JiraClient } from './jira-client.js'
 import {
   handleListMyOpen,
@@ -23,6 +32,15 @@ import {
   handleBind,
   handleGetBinding,
 } from './handlers.js'
+import { readBindingDetailBySession } from './storage.js'
+import {
+  isJiraTool,
+  isOutOfScope,
+  renderScopeContext,
+  renderScopeNotice,
+  renderScopeRefusal,
+  resolveScopeMode,
+} from './scope.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -68,6 +86,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     token:       Schema.string().role('secret').default(''),
     displayName: Schema.string().default('Ian Yin'),
     proxy:       Schema.string().default(''),
+    scopeMode:   Schema.string().default(DEFAULT_SCOPE_MODE),
   })
 
   let creds: ScjiraSettings
@@ -338,4 +357,105 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
       return { ok: true, key: r.key, sessionId: r.sessionId, summary: r.summary }
     },
   })))
+
+  // 5. Session scope — the binding carried into the agent's context.
+  //
+  // Two seams, both scoped to this plugin's fiber so they disappear with it:
+  //
+  //   agent/pre-step     — injects the binding before every step, so the
+  //                        model always knows which issue the session is on.
+  //   tools/post-execute — after a Jira tool ran, reports a call that
+  //                        reached outside the bound issue. Advisory mode
+  //                        attaches a note; narrow mode refuses the call.
+  //
+  // Both need the session's binding, which lives on disk. The lookup is
+  // cached per agent for the length of a turn and refreshed when the
+  // binding changes, so a step does not re-read the index on every call.
+  const bindingCache = new Map<string, { key: string; summary: string; issueSummary: ScjiraSettings extends never ? never : Record<string, string> } | null>()
+
+  async function bindingFor(sessionId: string): Promise<{
+    key: string
+    summary: string
+    issueSummary: Record<string, string>
+  } | null> {
+    const cached = bindingCache.get(sessionId)
+    if (cached !== undefined) return cached
+    const detail = await readBindingDetailBySession(config.tasksDir, sessionId)
+    const value = detail === null
+      ? null
+      : {
+          key: detail.key,
+          summary: detail.summary,
+          issueSummary: detail.issueSummary as unknown as Record<string, string>,
+        }
+    bindingCache.set(sessionId, value)
+    return value
+  }
+
+  // A binding change invalidates the cache: the next lookup re-reads the
+  // index rather than serving the previous binding.
+  ctx.effect(() => scope.watch(() => {
+    bindingCache.clear()
+  }))
+
+  ctx.on('agent/pre-step', async (
+    payload: { agent: { id: string } },
+    next: () => Promise<PreStepDecision>,
+  ): Promise<PreStepDecision> => {
+    const decision = await next()
+    if (decision.kind !== 'enter') return decision
+    const binding = await bindingFor(payload.agent.id)
+    if (binding === null) return decision
+    const text = renderScopeContext({
+      key: binding.key,
+      summary: binding.summary,
+      statusName: binding.issueSummary.statusName,
+      priority: binding.issueSummary.priority,
+      assignee: binding.issueSummary.assignee,
+      duedate: binding.issueSummary.duedate,
+    })
+    return {
+      ...decision,
+      messages: [
+        ...decision.messages,
+        createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: name, form: 'snapshot', sections: [{ name: 'scjira', text }] },
+        }),
+      ],
+    }
+  })
+
+  ctx.on('tools/post-execute', async (
+    exec: ToolExecution,
+    _result: unknown,
+    next: () => Promise<PostToolDecision>,
+  ): Promise<PostToolDecision> => {
+    const decision = await next()
+    if (!isJiraTool(exec.name)) return decision
+    if (exec.agent === undefined) return decision
+    const binding = await bindingFor(exec.agent.id)
+    if (binding === null) return decision
+
+    const { out, target } = isOutOfScope(exec.name, exec.arguments, binding.key)
+    if (!out || target === null) return decision
+
+    const mode = resolveScopeMode(creds.scopeMode)
+    if (mode === 'narrow') {
+      return {
+        kind: 'block',
+        feedback: [{ type: 'text', text: renderScopeRefusal(binding, target) }],
+      }
+    }
+    // Advisory: the call stands, and the model is told it strayed.
+    const text = renderScopeNotice(binding, target)
+    const notice = createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: name, form: 'snapshot', sections: [{ name: 'scjira', text }] },
+    })
+    return {
+      ...decision,
+      additionalContexts: [notice, ...(decision.additionalContexts ?? [])],
+    }
+  })
 }
