@@ -71,6 +71,96 @@ export interface MetaJsonV3 {
   summaryCount: number
 }
 
+/**
+ * Where a local worklog entry stands.
+ *
+ * `draft` — recorded locally, never sent to Jira.
+ * `synced` — uploaded; `jiraId` names the Jira worklog.
+ * `failed` — an upload attempt failed; the error is kept for a retry.
+ */
+export type WorklogEntryState = 'draft' | 'synced' | 'failed'
+
+/**
+ * Automatic worklog recording policy.
+ *
+ * The defaults match the reviewed decisions: recording is on, and the mode
+ * is one turn (one user question and its answer) rather than one step.
+ */
+export interface AutoWorklogConfig {
+  /** Record automatically at turn end. */
+  enabled: boolean
+  /** Ignore a turn shorter than this many seconds. */
+  minSeconds: number
+  /** Round the recorded duration up to a multiple of this many seconds. */
+  rounding: number
+  /** Cap one turn's recorded duration; a longer turn records this much. */
+  maxSecondsPerTurn: number
+  /** Put the session id in the worklog comment. */
+  includeSessionId: boolean
+}
+
+/**
+ * meta.json schema v4.
+ *
+ * v4 adds the automatic-worklog policy and makes the three counters real:
+ * `logCount` / `logBytes` / `summaryCount` were placeholders in v3 that
+ * nothing ever updated.
+ */
+export interface MetaJsonV4 extends Omit<MetaJsonV3, 'schemaVersion'> {
+  schemaVersion: 4
+  /** Rows in `log.jsonl`. */
+  logCount: number
+  /** Bytes of `log.jsonl`. */
+  logBytes: number
+  /** Files under `summary/`. */
+  summaryCount: number
+  /** Automatic worklog recording policy. */
+  autoWorklog: AutoWorklogConfig
+}
+
+/** Default automatic-worklog policy. */
+export const DEFAULT_AUTO_WORKLOG: AutoWorklogConfig = {
+  enabled: true,
+  minSeconds: 60,
+  rounding: 60,
+  maxSecondsPerTurn: 14400,
+  includeSessionId: true,
+}
+
+/** A session's turn summary, mirroring the v2 leftover format. */
+export interface SessionSummary {
+  schemaVersion: 1
+  key: string
+  turnSeq: number
+  writtenAt: string
+  body: {
+    text: string
+    highlights: string[]
+    blockers: string[]
+  }
+}
+
+/** One row of `log.jsonl`, mirroring the v2 leftover format. */
+export interface SessionLogEntry {
+  ts: string
+  text: string
+  source: string
+}
+
+/**
+ * The derived bidirectional binding index.
+ *
+ * A convenience file, never a source of truth: `meta.json` decides, and the
+ * index is rebuilt when the two disagree.
+ */
+export interface BindingIndex {
+  schemaVersion: 1
+  /** sessionId → issue key. */
+  bySession: Record<string, string>
+  /** issue key → sessionId. */
+  byKey: Record<string, string>
+}
+
 export const KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/
 
 export type JiraErrorKind = 'auth' | 'http' | 'network' | 'parse'
