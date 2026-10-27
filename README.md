@@ -9,6 +9,18 @@ DSH static plugin. Adds Jira integration:
 
 The original spec called for 3 right-sidebar sub-tabs, but `@deepseek-ai/dsh-client-ui-sidebar-right` is **not bundled** in the default dsh web profile — `ctx.sidebarRightTabs` never resolves. The plugin therefore mounts a `conversation.view` entry (the tab next to Trajectory) that carries the same 3 sub-tabs, plus a `settings.section` card for the credentials.
 
+## Status
+
+The current implementation is **v2**: read-only Jira views plus a manual binding record.
+
+The binding does **not** yet constrain the agent's context, and nothing is written back to
+Jira — `JiraClient` only issues GETs. The design for closing both gaps (context scoping
+via `tools/pre-execute` / `agent/pre-step`, and automatic worklog via
+`agent/turn-stopping`) is in **[docs/design/v3-session-binding.md](docs/design/v3-session-binding.md)**.
+
+Historical specs are archived in `docs/specs/` — the v2 runtime was lost on 2026-09-17 and
+that document was its only surviving source of truth.
+
 ## Architecture
 
 - **Host** (`src/index.ts`): registers the `scjira` settings namespace + 6 HTTP routes + 4 tools, all wrapped in `ctx.effect()` for dispose
