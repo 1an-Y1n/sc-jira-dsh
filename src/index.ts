@@ -41,6 +41,10 @@ import {
   renderScopeRefusal,
   resolveScopeMode,
 } from './scope.js'
+import { TurnTimer, autoComment, localTimestamp, secondsToRecord } from './turn-timer.js'
+import { appendWorklog } from './worklog-ledger.js'
+import { appendSessionLog, describeToolCall, writeSummary } from './session-log.js'
+import type { AutoWorklogConfig } from './types.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -69,6 +73,14 @@ interface WebServerHost {
 interface ScjiraSettingsScope<T> {
   get(): T
   watch(cb: (next: T) => void): () => void
+}
+
+/** A binding as the hooks need it: the issue, its facts, and its policy. */
+interface CachedBinding {
+  key: string
+  summary: string
+  issueSummary: Record<string, string>
+  autoWorklog: AutoWorklogConfig
 }
 
 export function apply(ctx: Context, config: { tasksDir: string }): void {
@@ -217,6 +229,8 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
             try {
               const parsed = JSON.parse(body) as { sessionId: string; taskKey: string }
               const r = await handleBind({ jira, creds, tasksDir: config.tasksDir }, parsed)
+              // The binding just changed on disk; the cached view of it is stale.
+              bindingCache.clear()
               res.writeHead(r.ok ? 200 : 400, { 'content-type': 'application/json' })
               res.end(JSON.stringify({ ...r, ok: r.ok }))
             } catch (err) {
@@ -353,8 +367,66 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     async execute(args, _exec) {
       if (!creds.token) throw new Error('请先在 Settings 填 Jira credentials')
       const r = await handleBind({ jira: makeClient(), creds, tasksDir: config.tasksDir }, args)
+      // The binding just changed on disk; the cached view of it is stale.
+      bindingCache.clear()
       if (!r.ok) return { ok: false, error: r.error }
       return { ok: true, key: r.key, sessionId: r.sessionId, summary: r.summary }
+    },
+  })))
+
+  // jira_summarize — the agent writes its own account of a turn.
+  //
+  // The host can see which tools ran; it cannot know what the agent was
+  // trying to do or whether it got there. A host-written summary would be a
+  // list of tool names. The agent's own summary is what the work actually
+  // was, so the agent writes it — and a turn it did not summarize simply has
+  // no summary file, which is more honest than a hollow one.
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_summarize',
+    description: '记录本轮工作的摘要（写入本 session 绑定 issue 的 summary/N.json）',
+    parameters: {
+      sessionId: { type: 'string', required: true },
+      turn:      { type: 'number', required: true, description: '本轮 turn 序号' },
+      text:      { type: 'string', required: true, description: '本轮做了什么、结论是什么' },
+      highlights: { type: 'array', description: '本轮的关键进展（可选）' },
+      blockers:  { type: 'array', description: '本轮遇到的阻碍（可选）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          key: { type: 'string' },
+          turnSeq: { type: 'number' },
+          path: { type: 'string' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        { type: 'text', text: value.ok ? `Summary written for turn ${value.turnSeq} (${value.key})` : `Summarize failed: ${value.error}` },
+      ],
+    },
+    async execute(args, _exec) {
+      const binding = await bindingFor(args.sessionId)
+      if (binding === null) {
+        return { ok: false, error: '本 session 未绑定 Jira issue，无法写入摘要' }
+      }
+      const written = await writeSummary(config.tasksDir, binding.key, {
+        turnSeq: args.turn,
+        writtenAt: new Date().toISOString(),
+        body: {
+          text: args.text,
+          highlights: Array.isArray(args.highlights) ? args.highlights.map(String) : [],
+          blockers: Array.isArray(args.blockers) ? args.blockers.map(String) : [],
+        },
+      })
+      return {
+        ok: true,
+        key: binding.key,
+        turnSeq: written.turnSeq,
+        path: `${config.tasksDir}/${binding.key}/summary/${written.turnSeq}.json`,
+      }
     },
   })))
 
@@ -369,17 +441,19 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
   //                        attaches a note; narrow mode refuses the call.
   //
   // Both need the session's binding, which lives on disk. The lookup is
-  // cached per agent for the length of a turn and refreshed when the
-  // binding changes, so a step does not re-read the index on every call.
-  const bindingCache = new Map<string, { key: string; summary: string; issueSummary: ScjiraSettings extends never ? never : Record<string, string> } | null>()
+  // cached briefly so a step does not re-read the index on every call, but
+  // the cache is short-lived: a binding can be made or ended from another
+  // client, and a stale "no binding" answer would silently disable the
+  // scope for that session until the process restarted.
+  const BINDING_CACHE_TTL_MS = 2000
+  const bindingCache = new Map<string, { at: number; value: CachedBinding | null }>()
 
-  async function bindingFor(sessionId: string): Promise<{
-    key: string
-    summary: string
-    issueSummary: Record<string, string>
-  } | null> {
+  async function bindingFor(sessionId: string): Promise<CachedBinding | null> {
+    const now = Date.now()
     const cached = bindingCache.get(sessionId)
-    if (cached !== undefined) return cached
+    if (cached !== undefined && now - cached.at < BINDING_CACHE_TTL_MS) {
+      return cached.value
+    }
     const detail = await readBindingDetailBySession(config.tasksDir, sessionId)
     const value = detail === null
       ? null
@@ -387,8 +461,9 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
           key: detail.key,
           summary: detail.summary,
           issueSummary: detail.issueSummary as unknown as Record<string, string>,
+          autoWorklog: detail.autoWorklog,
         }
-    bindingCache.set(sessionId, value)
+    bindingCache.set(sessionId, { at: now, value })
     return value
   }
 
@@ -457,5 +532,75 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
       ...decision,
       additionalContexts: [notice, ...(decision.additionalContexts ?? [])],
     }
+  })
+
+  // 6. Automatic worklog recording — LOCAL ONLY.
+  //
+  // A turn's wall-clock duration is recorded into the local ledger when the
+  // turn closes. Nothing is sent to Jira: an entry stays a draft until a
+  // person reviews it and uploads it. That is the whole point of the local
+  // ledger — the time is captured automatically, but the record on the
+  // tracker is a decision a human makes.
+  //
+  // The timer opens on the turn's first admitted step and closes at
+  // `agent/turn-stopping`.
+  const turnTimer = new TurnTimer()
+
+  ctx.on('agent/pre-step', async (
+    payload: { agent: { id: string }; turn: number },
+    next: () => Promise<PreStepDecision>,
+  ): Promise<PreStepDecision> => {
+    // Open the turn BEFORE delegating: the step's own work is part of the
+    // turn's duration, and a rejected step still consumed time.
+    turnTimer.start(payload.agent.id, payload.turn)
+    return next()
+  })
+
+  ctx.on('agent/turn-stopping', async (payload: { agent: { id: string }; turn: number }) => {
+    const span = turnTimer.end(payload.agent.id, payload.turn)
+    if (span === null) return
+    const binding = await bindingFor(payload.agent.id)
+    if (binding === null) return
+    const seconds = secondsToRecord(span.elapsedMs, binding.autoWorklog)
+    if (seconds === null) return
+    try {
+      await appendWorklog(config.tasksDir, binding.key, {
+        turn: payload.turn,
+        step: null,
+        seconds,
+        comment: autoComment(payload.turn, payload.agent.id, binding.autoWorklog.includeSessionId),
+        startedAt: localTimestamp(span.startedAt),
+        createdAt: localTimestamp(span.endedAt),
+      })
+    } catch {
+      // Recording must never disturb the agent. A ledger write that fails is
+      // a missing entry, not a broken turn.
+    }
+  })
+
+  // 7. Activity log — what actually ran.
+  //
+  // The host writes this because it can observe the durable session events.
+  // The summary of a turn is the agent's to write (see the jira_summarize
+  // tool): only the agent knows what it was trying to do.
+  ctx.on('session/event', (session: { id: string }, event: { type: string; data?: unknown }) => {
+    if (event.type !== 'tool/call') return
+    const data = event.data as { name?: string; arguments?: string } | undefined
+    if (data?.name === undefined) return
+    const toolName = data.name
+    const toolArgs = data.arguments ?? ''
+    void (async () => {
+      const binding = await bindingFor(session.id)
+      if (binding === null) return
+      try {
+        await appendSessionLog(config.tasksDir, binding.key, {
+          ts: new Date().toISOString(),
+          text: describeToolCall(toolName, toolArgs),
+          source: 'command',
+        })
+      } catch {
+        // A log write that fails must not disturb the session.
+      }
+    })()
   })
 }

@@ -56,20 +56,20 @@ function makeContext() {
 }
 
 describe('host plugin dispose', () => {
-  it('registers 1 settings namespace + 1 route prefix + 4 tools on apply', async () => {
+  it('registers 1 settings namespace + 1 route prefix + 5 tools on apply', async () => {
     const { ctx, routes, tools, settingsRegs, disposers } = makeContext()
     const { apply } = await import('../src/index.js')
     apply(ctx, { tasksDir: '/tmp/scjira-dispose-test' })
     expect(settingsRegs.has('scjira')).toBe(true)
     expect(settingsRegs.size).toBe(1)
     expect(routes.length).toBe(1)
-    expect(tools.size).toBe(4)
-    // 4 tool registrations + 1 webServer registration + 1 settings registration
-    // → all in effects → at least 6 should be tracked
-    expect(disposers.length).toBeGreaterThanOrEqual(6)
+    expect(tools.size).toBe(5)
+    // 5 tool registrations + 1 webServer registration + 1 settings registration
+    // → all in effects → at least 7 should be tracked
+    expect(disposers.length).toBeGreaterThanOrEqual(7)
   })
 
-  it('all 4 expected tool names are registered', async () => {
+  it('all 5 expected tool names are registered', async () => {
     const { ctx, tools } = makeContext()
     const { apply } = await import('../src/index.js')
     apply(ctx, { tasksDir: '/tmp/scjira-dispose-test' })
@@ -77,6 +77,7 @@ describe('host plugin dispose', () => {
     expect(tools.has('jira_list_worklog_week')).toBe(true)
     expect(tools.has('jira_get_binding')).toBe(true)
     expect(tools.has('jira_bind')).toBe(true)
+    expect(tools.has('jira_summarize')).toBe(true)
   })
 
   it('route prefix is /api/scjira', async () => {
