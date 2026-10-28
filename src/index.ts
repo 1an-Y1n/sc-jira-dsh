@@ -43,6 +43,12 @@ import {
 } from './scope.js'
 import { TurnTimer, autoComment, localTimestamp, secondsToRecord } from './turn-timer.js'
 import { appendWorklog } from './worklog-ledger.js'
+import {
+  handleEditWorklog,
+  handleListWorklogs,
+  handleRepullWorklogs,
+  handleUploadWorklogs,
+} from './worklog-handlers.js'
 import { appendSessionLog, describeToolCall, writeSummary } from './session-log.js'
 import type { AutoWorklogConfig } from './types.js'
 import { join } from 'node:path'
@@ -246,6 +252,94 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         res.writeHead(500, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ok: false, error: (err as Error).message }))
       }
+    },
+  }))
+
+  // 3b. Worklog ledger routes.
+  //
+  // The ledger lives on disk; these routes read it, edit it, and — when the
+  // user asks — send the SELECTED entries to Jira. Nothing here uploads
+  // without being told to: the upload is the review's outcome, not the
+  // recorder's decision.
+  ctx.effect(() => webServer.register({
+    kind: 'prefix',
+    path: '/api/scjira/worklog',
+    handler: async (req, res) => {
+      const url = req.url ?? ''
+      const method = req.method ?? 'GET'
+      const u = new URL(url, 'http://x')
+      const key = u.searchParams.get('key') ?? ''
+      const json = (status: number, body: unknown) => {
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(body))
+      }
+      const deps = { jira: makeClient(), creds, tasksDir: config.tasksDir }
+
+      if (method === 'GET' && u.pathname.endsWith('/worklog')) {
+        const r = await handleListWorklogs(deps, { key })
+        json(r.ok ? 200 : 400, r)
+        return
+      }
+
+      if (method === 'POST' && u.pathname.endsWith('/worklog/edit')) {
+        let body = ''
+        req.on('data', c => { body += c })
+        req.on('end', async () => {
+          try {
+            const parsed = JSON.parse(body) as {
+              key?: string; id?: string; seconds?: number; comment?: string; startedAt?: string
+            }
+            const r = await handleEditWorklog(deps, {
+              key: parsed.key ?? key,
+              id: parsed.id ?? '',
+              edit: {
+                seconds: parsed.seconds,
+                comment: parsed.comment,
+                startedAt: parsed.startedAt,
+              },
+            })
+            json(r.ok ? 200 : 400, r)
+          } catch (err) {
+            json(400, { ok: false, error: (err as Error).message })
+          }
+        })
+        return
+      }
+
+      if (method === 'POST' && u.pathname.endsWith('/worklog/upload')) {
+        let body = ''
+        req.on('data', c => { body += c })
+        req.on('end', async () => {
+          try {
+            const parsed = JSON.parse(body) as { key?: string; ids?: string[] }
+            const r = await handleUploadWorklogs(deps, {
+              key: parsed.key ?? key,
+              ids: parsed.ids ?? [],
+            })
+            json(r.ok ? 200 : 400, r)
+          } catch (err) {
+            json(400, { ok: false, error: (err as Error).message })
+          }
+        })
+        return
+      }
+
+      if (method === 'POST' && u.pathname.endsWith('/worklog/repull')) {
+        let body = ''
+        req.on('data', c => { body += c })
+        req.on('end', async () => {
+          try {
+            const parsed = JSON.parse(body) as { key?: string }
+            const r = await handleRepullWorklogs(deps, { key: parsed.key ?? key })
+            json(r.ok ? 200 : 400, r)
+          } catch (err) {
+            json(400, { ok: false, error: (err as Error).message })
+          }
+        })
+        return
+      }
+
+      json(404, { ok: false, error: 'route not found' })
     },
   }))
 

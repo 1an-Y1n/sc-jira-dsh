@@ -56,17 +56,18 @@ function makeContext() {
 }
 
 describe('host plugin dispose', () => {
-  it('registers 1 settings namespace + 1 route prefix + 5 tools on apply', async () => {
+  it('registers 1 settings namespace + 2 route prefixes + 5 tools on apply', async () => {
     const { ctx, routes, tools, settingsRegs, disposers } = makeContext()
     const { apply } = await import('../src/index.js')
     apply(ctx, { tasksDir: '/tmp/scjira-dispose-test' })
     expect(settingsRegs.has('scjira')).toBe(true)
     expect(settingsRegs.size).toBe(1)
-    expect(routes.length).toBe(1)
+    // Two prefixes: the main /api/scjira routes and the worklog ledger's.
+    expect(routes.length).toBe(2)
     expect(tools.size).toBe(5)
-    // 5 tool registrations + 1 webServer registration + 1 settings registration
-    // → all in effects → at least 7 should be tracked
-    expect(disposers.length).toBeGreaterThanOrEqual(7)
+    // 5 tool registrations + 2 webServer registrations + 1 settings registration
+    // → all in effects → at least 8 should be tracked
+    expect(disposers.length).toBeGreaterThanOrEqual(8)
   })
 
   it('all 5 expected tool names are registered', async () => {

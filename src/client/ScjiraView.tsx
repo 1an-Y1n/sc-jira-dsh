@@ -12,10 +12,11 @@
 import * as React from 'react'
 import type { IssueSummary, DayTotal } from '../types.js'
 import { addDays, mondayOf, todayIso } from '../timezone.js'
+import { WorklogLedgerPanel } from './WorklogLedgerPanel.js'
 
 interface ScjiraViewProps {
   sessionId: string
-  t: (key: string) => string
+  t: (key: string, params?: Record<string, string | number>) => string
 }
 
 type SubTab = 'open' | 'worklog' | 'bind'
@@ -575,6 +576,21 @@ function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraVi
         </button>
       </div>
       {msg && <div style={{ marginTop: 8, color: SUCCESS }}>{msg}</div>}
+
+      {/* The local worklog ledger. It fills as the session works, and
+          nothing reaches Jira until the user selects entries and uploads
+          them — the upload is the review's outcome, not the recorder's
+          decision. */}
+      <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${BORDER_SOFT}` }}>
+        <div style={{ marginBottom: 10, color: FG, fontWeight: 600, fontSize: 13 }}>
+          {t('worklog.title')}
+        </div>
+        <WorklogLedgerPanel
+          issueKey={data?.bound === true ? (data.key ?? '') : ''}
+          fetchJson={fetchJson}
+          t={t}
+        />
+      </div>
     </div>
   )
 }
