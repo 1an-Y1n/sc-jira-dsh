@@ -570,17 +570,29 @@ ctx.commandUi.register({
 
 ## 13. 实施顺序
 
-| 阶段 | 内容 | 产出 | 估时 |
-|---|---|---|---|
-| **P1** | `JiraClient.addWorklog()` / `updateWorklog()` / `deleteWorklog()` + 时长格式化 | 能读写 Jira 工时 | 0.5 天 |
-| **P2** | 本地账本：`worklog.jsonl` 追加/编辑/读取 + `meta.json` v4 + 双向索引 | 本地账本层 | 1 天 |
-| **P3** | `agent/pre-step` 注入 + `tools/post-execute` 提示（advisory） | **G1 达成** | 1 天 |
-| **P4** | turn 计时 + 本地记账 + `log.jsonl` + `summary/N.json` | **G2 达成（本地部分）** | 1.5 天 |
-| **P5** | UI 工时账本面板（review / 编辑 / 上传 / 从 Jira 重拉） | **G2 达成（上传部分）+ G3** | 1.5 天 |
-| **P6** | `/jira-bind` `/jira-unbind` `/jira-worklog` 命令 + 客户端 popup | **G6 达成** | 1 天 |
-| **P7** | 新工具（`jira_issue`/`jira_log_worklog`/`jira_upload_worklogs`/`jira_summarize`/`jira_comment`/`jira_current`/`jira_unbind`） | 工具完善 | 1 天 |
+| 阶段 | 内容 | 产出 | 估时 | 状态 |
+|---|---|---|---|---|
+| **P1** | `JiraClient.addWorklog()` / `updateWorklog()` / `deleteWorklog()` + 时长格式化 | 能读写 Jira 工时 | 0.5 天 | ✅ 已实现 |
+| **P2** | 本地账本：`worklog.jsonl` 追加/编辑/读取 + `meta.json` v4 + 双向索引 | 本地账本层 | 1 天 | ✅ 已实现 |
+| **P3** | `agent/pre-step` 注入 + `tools/post-execute` 提示（advisory） | **G1 达成** | 1 天 | ✅ 已实现 |
+| **P4** | turn 计时 + 本地记账 + `log.jsonl` + `summary/N.json` | **G2 达成（本地部分）** | 1.5 天 | ✅ 已实现 |
+| **P5** | UI 工时账本面板（review / 编辑 / 上传 / 从 Jira 重拉） | **G2 达成（上传部分）+ G3** | 1.5 天 | ✅ 已实现 |
+| **P6** | `/jira-bind` `/jira-unbind` `/jira-worklog` 命令 + 客户端 popup | **G6 达成** | 1 天 | ✅ 已实现 |
+| **P7** | 新工具（`jira_issue`/`jira_log_worklog`/`jira_worklogs`/`jira_upload_worklogs`/`jira_summarize`/`jira_comment`/`jira_current`/`jira_unbind`） | 工具完善 | 1 天 | ✅ 已实现 |
 
 **里程碑**：P1+P2+P3 → G1（~2.5 天）；P1+P2+P4+P5 → G2+G3（~4.5 天）；+P6 → G6（~5.5 天）。
+
+> **实施说明（2026-10-28）**
+>
+> - P7 的工具从**执行上下文**解析 session（`exec.agent.id` 即 SessionId），模型无需知道或
+>   传自己的 session id；显式 `sessionId` 参数仍然优先。v2 的 `jira_bind` / `jira_get_binding` /
+>   `jira_summarize` 一并改为可选参数。
+> - `/jira-worklog` 返回**本地账本文本摘要**。宿主命令无法把用户切到会话视图的某个子标签，
+>   与其假装能打开面板，不如给出可读的数字；上传仍然只在面板里发生。
+> - `/jira-bind` 的客户端弹窗是 **`ctx.commandUi.decorate`**（装饰既有宿主命令），不是
+>   `register`（新建客户端命令）：装饰保留宿主命令的目录行与生命周期日志，弹窗只替换
+>   裸调用时的选择动作，选中后回填一条完整的命令行 `/jira-bind DZ300-XXXX` 交给宿主执行 ——
+>   绑定走的是与手输 key 完全相同的同一条路径。
 
 ---
 

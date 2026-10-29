@@ -11,7 +11,7 @@
  */
 import type { IssueSummary, WorklogEntry, DayTotal, ScjiraSettings, JiraResult } from './types.js'
 import { KEY_RE } from './types.js'
-import { writeMetaWithBinding, readBindingBySession, type BindingResult } from './storage.js'
+import { writeMetaWithBinding, readBindingBySession, endBinding, type BindingResult } from './storage.js'
 import { addDays, mondayOf, todayIso } from './timezone.js'
 
 // --- helpers ---------------------------------------------------------------
@@ -290,4 +290,148 @@ export async function handleGetBinding(
   args: { sessionId: string },
 ): Promise<BindingResult> {
   return readBindingBySession(deps.tasksDir, args.sessionId)
+}
+
+// --- issue detail ----------------------------------------------------------
+//
+// The agent working on a ticket needs the ticket itself: its description and
+// the conversation that happened around it. `jira_issue` is that read.
+
+/** One comment on an issue. */
+export interface IssueComment {
+  id: string
+  author: string
+  created: string
+  updated: string
+  body: string
+}
+
+/** An issue with its comments. */
+export interface IssueDetail extends IssueSummary {
+  comments: IssueComment[]
+}
+
+export interface IssueDeps {
+  jira: {
+    issue: (key: string) => Promise<JiraResult<any>>
+    comments: (key: string, opts?: { startAt?: number; maxResults?: number }) => Promise<JiraResult<any>>
+  }
+  creds: ScjiraSettings
+}
+
+export type IssueResult =
+  | { ok: true; issue: IssueDetail }
+  | { ok: false; error: string }
+
+/**
+ * Read one issue and its comments.
+ *
+ * Comments are optional context: a failure to read them does not fail the
+ * whole read, because the issue's own description is usually the part the
+ * agent needs. The failure is reported on the result so the caller can say
+ * so rather than silently dropping the conversation.
+ */
+export async function handleIssue(deps: IssueDeps, args: { key: string }): Promise<IssueResult> {
+  if (!KEY_RE.test(args.key)) {
+    return { ok: false, error: `Invalid issue key format (expected PROJECT-123): got "${args.key}"` }
+  }
+  const env = await deps.jira.issue(args.key)
+  if (!env.ok) {
+    const msg = env.error === 'network' ? 'Jira unavailable (network)'
+      : env.error === 'auth' ? 'Jira auth failed — check token'
+      : `Jira rejected ${args.key} (${env.error})`
+    return { ok: false, error: msg }
+  }
+  const summary = summarizeRawIssue(env.body, [], deps.creds.server)
+
+  let comments: IssueComment[] = []
+  let commentError: string | undefined
+  const page = await deps.jira.comments(args.key, { startAt: 0, maxResults: 100 })
+  if (!page.ok) {
+    commentError = `Jira returned ${page.error} for comments`
+  } else {
+    comments = (page.body?.comments ?? []).map((c: any): IssueComment => ({
+      id: c.id ?? '',
+      author: c.author?.displayName ?? c.author?.name ?? '',
+      created: c.created ?? '',
+      updated: c.updated ?? '',
+      body: typeof c.body === 'string' ? c.body : '',
+    }))
+  }
+
+  return {
+    ok: true,
+    issue: { ...summary, comments, ...(commentError !== undefined ? { commentError } : {}) },
+  }
+}
+
+// --- comment ---------------------------------------------------------------
+
+export interface AddCommentDeps {
+  jira: { addComment: (key: string, body: string) => Promise<JiraResult<any>> }
+}
+
+export type AddCommentResult =
+  | { ok: true; comment: IssueComment }
+  | { ok: false; error: string }
+
+/**
+ * Add a comment to an issue.
+ *
+ * This is a write to the tracker, so it happens only when a caller asked for
+ * it — never as a side effect of reading something.
+ */
+export async function handleAddComment(
+  deps: AddCommentDeps,
+  args: { key: string; body: string },
+): Promise<AddCommentResult> {
+  if (!KEY_RE.test(args.key)) {
+    return { ok: false, error: `Invalid issue key format (expected PROJECT-123): got "${args.key}"` }
+  }
+  if (args.body.trim() === '') {
+    return { ok: false, error: 'comment body is empty' }
+  }
+  const created = await deps.jira.addComment(args.key, args.body)
+  if (!created.ok) {
+    return { ok: false, error: `Jira rejected the comment (${created.error}${created.detail !== undefined ? `: ${created.detail}` : ''})` }
+  }
+  const c = created.body ?? {}
+  return {
+    ok: true,
+    comment: {
+      id: c.id ?? '',
+      author: c.author?.displayName ?? c.author?.name ?? '',
+      created: c.created ?? '',
+      updated: c.updated ?? '',
+      body: typeof c.body === 'string' ? c.body : args.body,
+    },
+  }
+}
+
+// --- unbind ----------------------------------------------------------------
+
+export interface UnbindDeps {
+  tasksDir: string
+}
+
+export type UnbindResult =
+  | { ok: true; key: string; summary: string }
+  | { ok: false; error: string }
+
+/**
+ * End a session's binding, keeping the files it produced.
+ *
+ * The worklog ledger and the session log stay on disk — the history belongs
+ * to the work, not to the binding. Only the link between this session and
+ * this issue goes away.
+ */
+export async function handleUnbind(
+  deps: UnbindDeps,
+  args: { sessionId: string },
+): Promise<UnbindResult> {
+  const ended = await endBinding(deps.tasksDir, args.sessionId)
+  if (ended === null) {
+    return { ok: false, error: 'this session is not bound to any Jira issue' }
+  }
+  return { ok: true, key: ended.key, summary: ended.summary }
 }

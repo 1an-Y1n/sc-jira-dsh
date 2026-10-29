@@ -25,12 +25,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import Schema from '@deepseek-ai/schemastery'
 import type { ScjiraSettings } from './types.js'
 import { DEFAULT_SCOPE_MODE } from './types.js'
-import { JiraClient } from './jira-client.js'
+import { JiraClient, formatDuration } from './jira-client.js'
 import {
   handleListMyOpen,
   handleListWorklogWeek,
   handleBind,
   handleGetBinding,
+  handleIssue,
+  handleAddComment,
+  handleUnbind,
 } from './handlers.js'
 import { readBindingDetailBySession } from './storage.js'
 import {
@@ -42,7 +45,7 @@ import {
   resolveScopeMode,
 } from './scope.js'
 import { TurnTimer, autoComment, localTimestamp, secondsToRecord } from './turn-timer.js'
-import { appendWorklog } from './worklog-ledger.js'
+import { appendWorklog, readLedger, summarizeLedger } from './worklog-ledger.js'
 import {
   handleEditWorklog,
   handleListWorklogs,
@@ -87,6 +90,8 @@ interface CachedBinding {
   summary: string
   issueSummary: Record<string, string>
   autoWorklog: AutoWorklogConfig
+  /** When the binding started, in epoch milliseconds. */
+  startedAtMs: number
 }
 
 export function apply(ctx: Context, config: { tasksDir: string }): void {
@@ -135,6 +140,27 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
       clientFingerprint = fp
     }
     return client
+  }
+
+  /**
+   * The session a call belongs to.
+   *
+   * The explicit argument wins; otherwise the caller's own session is used.
+   * A call with neither has no session, and every session-scoped tool says
+   * so rather than guessing.
+   */
+  function sessionOf(
+    args: unknown,
+    exec: { agent?: { id: string } },
+  ): string | null {
+    if (typeof args === 'object' && args !== null) {
+      const explicit = (args as { sessionId?: unknown }).sessionId
+      if (typeof explicit === 'string' && explicit.trim() !== '') {
+        return explicit.trim()
+      }
+    }
+    const id = exec.agent?.id
+    return typeof id === 'string' && id !== '' ? id : null
   }
 
   // 3. HTTP routes
@@ -208,6 +234,14 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
       try {
         const jira = makeClient()
         if (route === 'list-my-open' && method === 'GET') {
+          const r = await handleListMyOpen({ jira, creds })
+          res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(r))
+          return
+        }
+        // The command picker's route. Same data as list-my-open under the
+        // name the picker uses — one endpoint, two callers.
+        if (route === 'open-issues' && method === 'GET') {
           const r = await handleListMyOpen({ jira, creds })
           res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json' })
           res.end(JSON.stringify(r))
@@ -412,7 +446,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     name: 'jira_get_binding',
     description: '查询指定 DSH session 是否已绑定到 Jira issue',
     parameters: {
-      sessionId: { type: 'string', required: true },
+      sessionId: { type: 'string', description: '目标 session；缺省为调用方所在的 session' },
     },
     output: {
       schema: {
@@ -429,8 +463,12 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         { type: 'text', text: value.bound ? `Bound to ${value.key}: ${value.summary}` : 'Not bound' },
       ],
     },
-    async execute(args, _exec) {
-      const r = await handleGetBinding({ tasksDir: config.tasksDir }, { sessionId: args.sessionId })
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      if (sessionId === null) {
+        return { bound: false, sessionId: '' }
+      }
+      const r = await handleGetBinding({ tasksDir: config.tasksDir }, { sessionId })
       return { bound: r.bound, key: r.key, summary: r.summary, sessionId: r.sessionId }
     },
   })))
@@ -439,7 +477,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     name: 'jira_bind',
     description: '将当前 DSH session 绑定到一个 Jira issue key',
     parameters: {
-      sessionId: { type: 'string', required: true },
+      sessionId: { type: 'string', description: '目标 session；缺省为调用方所在的 session' },
       taskKey:   { type: 'string', required: true, description: 'e.g. DZ300-1826' },
     },
     output: {
@@ -458,9 +496,16 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         { type: 'text', text: value.ok ? `Bound to ${value.key}` : `Bind failed: ${value.error}` },
       ],
     },
-    async execute(args, _exec) {
+    async execute(args, exec) {
       if (!creds.token) throw new Error('请先在 Settings 填 Jira credentials')
-      const r = await handleBind({ jira: makeClient(), creds, tasksDir: config.tasksDir }, args)
+      const sessionId = sessionOf(args, exec)
+      if (sessionId === null) {
+        return { ok: false, error: '无法确定本 session' }
+      }
+      const r = await handleBind(
+        { jira: makeClient(), creds, tasksDir: config.tasksDir },
+        { sessionId, taskKey: args.taskKey },
+      )
       // The binding just changed on disk; the cached view of it is stale.
       bindingCache.clear()
       if (!r.ok) return { ok: false, error: r.error }
@@ -479,7 +524,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     name: 'jira_summarize',
     description: '记录本轮工作的摘要（写入本 session 绑定 issue 的 summary/N.json）',
     parameters: {
-      sessionId: { type: 'string', required: true },
+      sessionId: { type: 'string', description: '目标 session；缺省为调用方所在的 session' },
       turn:      { type: 'number', required: true, description: '本轮 turn 序号' },
       text:      { type: 'string', required: true, description: '本轮做了什么、结论是什么' },
       highlights: { type: 'array', description: '本轮的关键进展（可选）' },
@@ -501,8 +546,12 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         { type: 'text', text: value.ok ? `Summary written for turn ${value.turnSeq} (${value.key})` : `Summarize failed: ${value.error}` },
       ],
     },
-    async execute(args, _exec) {
-      const binding = await bindingFor(args.sessionId)
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      if (sessionId === null) {
+        return { ok: false, error: '无法确定本 session' }
+      }
+      const binding = await bindingFor(sessionId)
       if (binding === null) {
         return { ok: false, error: '本 session 未绑定 Jira issue，无法写入摘要' }
       }
@@ -521,6 +570,427 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         turnSeq: written.turnSeq,
         path: `${config.tasksDir}/${binding.key}/summary/${written.turnSeq}.json`,
       }
+    },
+  })))
+
+  // 4b. The tools the agent needs to work ON a ticket.
+  //
+  // The v2 tools could list and query. They could not read a ticket, record
+  // time against it, comment on it, or see what the session was already
+  // bound to. These close that gap.
+  //
+  // Every one of them resolves its session from the execution itself —
+  // `exec.agent.id` IS the session id — so the model never has to know or
+  // pass its own session id. An explicit `sessionId` argument still wins for
+  // the rare caller that means a different session.
+  //
+  // The worklog tools write LOCALLY only. `jira_upload_worklogs` is the one
+  // exception, and it is the exception by design: it exists so a person can
+  // ask the agent to push an entry they have already reviewed. Nothing here
+  // uploads on its own.
+
+  /**
+   * When each issue's ledger last recorded an entry.
+   *
+   * `jira_log_worklog` without an explicit duration measures the wall clock
+   * since the last record — the time since the work actually started, not
+   * since the process did. The automatic turn recorder feeds this map too,
+   * so the two paths measure from the same point.
+   */
+  const lastRecordedAt = new Map<string, number>()
+
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_issue',
+    description: '读取一个 Jira issue 的详情（描述全文 + 评论列表）',
+    parameters: {
+      key: { type: 'string', description: 'issue key，如 DZ300-1826；缺省为当前 session 绑定的 issue' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          key: { type: 'string' },
+          summary: { type: 'string' },
+          description: { type: 'string' },
+          statusName: { type: 'string' },
+          priority: { type: 'string' },
+          assignee: { type: 'string' },
+          url: { type: 'string' },
+          comments: { type: 'array' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        {
+          type: 'text',
+          text: value.ok === false
+            ? `Jira issue failed: ${value.error}`
+            : `${value.key} — ${value.summary} (${value.comments?.length ?? 0} comments)`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      const binding = sessionId === null ? null : await bindingFor(sessionId)
+      const key = (args.key ?? '').trim() || binding?.key || ''
+      if (key === '') {
+        return { ok: false, error: '未指定 issue key，且本 session 未绑定 Jira issue' }
+      }
+      if (!creds.token) throw new Error('请先在 Settings 填 Jira credentials')
+      const r = await handleIssue({ jira: makeClient(), creds }, { key })
+      if (!r.ok) return { ok: false, error: r.error }
+      return {
+        ok: true,
+        key: r.issue.key,
+        summary: r.issue.summary,
+        description: r.issue.description,
+        statusName: r.issue.statusName,
+        priority: r.issue.priority,
+        assignee: r.issue.assignee,
+        url: r.issue.url,
+        comments: r.issue.comments,
+      }
+    },
+  })))
+
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_log_worklog',
+    description: '在本地工时账本记一条工时（只写本地，不上传 Jira）',
+    parameters: {
+      key: { type: 'string', description: 'issue key；缺省为当前 session 绑定的 issue' },
+      seconds: { type: 'number', description: '工时秒数；缺省为自上次记录以来的墙钟时长' },
+      comment: { type: 'string', description: '工时说明' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          id: { type: 'string' },
+          key: { type: 'string' },
+          seconds: { type: 'number' },
+          duration: { type: 'string' },
+          comment: { type: 'string' },
+          startedAt: { type: 'string' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        {
+          type: 'text',
+          text: value.ok === false
+            ? `Log worklog failed: ${value.error}`
+            : `Recorded ${value.duration} on ${value.key} (${value.id}) — local only`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      if (sessionId === null) {
+        return { ok: false, error: '无法确定本 session' }
+      }
+      const binding = await bindingFor(sessionId)
+      if (binding === null) {
+        return { ok: false, error: '本 session 未绑定 Jira issue' }
+      }
+      const key = (args.key ?? '').trim() || binding.key
+
+      // The duration is either what the caller measured, or the wall clock
+      // since the last record. The policy's floor, rounding and ceiling apply
+      // to the measured case; its on/off switch does not — the caller asked
+      // for this entry to exist.
+      let seconds = args.seconds
+      let startedAtMs = Date.now()
+      if (seconds === undefined) {
+        const since = lastRecordedAt.get(key) ?? binding.startedAtMs
+        const measured = secondsToRecord(Date.now() - since, binding.autoWorklog, { requireEnabled: false })
+        if (measured === null) {
+          return { ok: false, error: '距离上次记录的时间不足最短工时阈值' }
+        }
+        seconds = measured
+        startedAtMs = since
+      } else {
+        startedAtMs = Date.now() - seconds * 1000
+      }
+      if (seconds <= 0) {
+        return { ok: false, error: '工时必须大于 0 秒' }
+      }
+
+      const entry = await appendWorklog(config.tasksDir, key, {
+        turn: null,
+        step: null,
+        seconds,
+        comment: args.comment ?? `agent: manual log (session ${sessionId.slice(0, 12)})`,
+        startedAt: localTimestamp(startedAtMs),
+        createdAt: localTimestamp(Date.now()),
+      })
+      lastRecordedAt.set(key, Date.now())
+      return {
+        ok: true,
+        id: entry.id,
+        key,
+        seconds: entry.seconds,
+        duration: formatDuration(entry.seconds),
+        comment: entry.comment,
+        startedAt: entry.startedAt,
+      }
+    },
+  })))
+
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_worklogs',
+    description: '读取本地工时账本（各条记录的时长、说明与上传状态）',
+    parameters: {
+      key: { type: 'string', description: 'issue key；缺省为当前 session 绑定的 issue' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          key: { type: 'string' },
+          entries: { type: 'array' },
+          totalSeconds: { type: 'number' },
+          totalDuration: { type: 'string' },
+          draftCount: { type: 'number' },
+          syncedCount: { type: 'number' },
+          failedCount: { type: 'number' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        {
+          type: 'text',
+          text: value.ok === false
+            ? `Read worklogs failed: ${value.error}`
+            : `${value.key}: ${value.entries?.length ?? 0} entries · ${value.totalDuration} · ${value.draftCount ?? 0} pending upload`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      const binding = sessionId === null ? null : await bindingFor(sessionId)
+      const key = (args.key ?? '').trim() || binding?.key || ''
+      if (key === '') {
+        return { ok: false, error: '未指定 issue key，且本 session 未绑定 Jira issue' }
+      }
+      const entries = await readLedger(config.tasksDir, key)
+      const totals = summarizeLedger(entries)
+      return {
+        ok: true,
+        key,
+        entries: entries.map(e => ({
+          id: e.id,
+          turn: e.turn,
+          seconds: e.seconds,
+          duration: formatDuration(e.seconds),
+          comment: e.comment,
+          startedAt: e.startedAt,
+          state: e.state,
+          jiraId: e.jiraId,
+          error: e.error,
+        })),
+        totalSeconds: totals.totalSeconds,
+        totalDuration: formatDuration(totals.totalSeconds),
+        draftCount: totals.draftCount,
+        syncedCount: totals.syncedCount,
+        failedCount: totals.failedCount,
+      }
+    },
+  })))
+
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_upload_worklogs',
+    description: '把本地工时账本中已选定的条目上传到 Jira（默认上传全部待传条目；不会上传已同步的条目）',
+    parameters: {
+      key: { type: 'string', description: 'issue key；缺省为当前 session 绑定的 issue' },
+      ids: { type: 'array', description: '要上传的本地条目 id 列表（如 wl-01）；缺省为全部待传条目' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          key: { type: 'string' },
+          uploaded: { type: 'array' },
+          syncedCount: { type: 'number' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        {
+          type: 'text',
+          text: value.ok === false
+            ? `Upload failed: ${value.error}`
+            : `Uploaded ${value.syncedCount ?? 0} entries to ${value.key}`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      const binding = sessionId === null ? null : await bindingFor(sessionId)
+      const key = (args.key ?? '').trim() || binding?.key || ''
+      if (key === '') {
+        return { ok: false, error: '未指定 issue key，且本 session 未绑定 Jira issue' }
+      }
+      if (!creds.token) throw new Error('请先在 Settings 填 Jira credentials')
+
+      // No explicit selection means every pending entry. An explicit empty
+      // list means nothing — the caller said zero, and "upload all" is not
+      // something a tool may decide on its own.
+      const entries = await readLedger(config.tasksDir, key)
+      const ids = Array.isArray(args.ids)
+        ? args.ids.map(String)
+        : entries.filter(e => e.state !== 'synced').map(e => e.id)
+
+      const r = await handleUploadWorklogs(
+        { jira: makeClient(), creds, tasksDir: config.tasksDir },
+        { key, ids },
+      )
+      if (!r.ok) return { ok: false, error: r.error }
+      return { ok: true, key, uploaded: r.uploaded, syncedCount: r.syncedCount }
+    },
+  })))
+
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_comment',
+    description: '在 Jira issue 上添加一条评论',
+    parameters: {
+      key: { type: 'string', description: 'issue key；缺省为当前 session 绑定的 issue' },
+      body: { type: 'string', required: true, description: '评论正文' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          key: { type: 'string' },
+          id: { type: 'string' },
+          author: { type: 'string' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        {
+          type: 'text',
+          text: value.ok === false ? `Comment failed: ${value.error}` : `Comment added to ${value.key}`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      const binding = sessionId === null ? null : await bindingFor(sessionId)
+      const key = (args.key ?? '').trim() || binding?.key || ''
+      if (key === '') {
+        return { ok: false, error: '未指定 issue key，且本 session 未绑定 Jira issue' }
+      }
+      if (!creds.token) throw new Error('请先在 Settings 填 Jira credentials')
+      const r = await handleAddComment({ jira: makeClient() }, { key, body: args.body })
+      if (!r.ok) return { ok: false, error: r.error }
+      return { ok: true, key, id: r.comment.id, author: r.comment.author }
+    },
+  })))
+
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_current',
+    description: '查看当前 session 的 Jira 绑定详情与已记工时统计',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          bound: { type: 'boolean' },
+          key: { type: 'string' },
+          summary: { type: 'string' },
+          statusName: { type: 'string' },
+          priority: { type: 'string' },
+          assignee: { type: 'string' },
+          url: { type: 'string' },
+          totalSeconds: { type: 'number' },
+          totalDuration: { type: 'string' },
+          draftCount: { type: 'number' },
+          syncedCount: { type: 'number' },
+          failedCount: { type: 'number' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        {
+          type: 'text',
+          text: value.ok === false || value.bound !== true
+            ? 'This session is not bound to a Jira issue'
+            : `Bound to ${value.key} — ${value.summary} · ${value.totalDuration} recorded (${value.draftCount ?? 0} pending upload)`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      if (sessionId === null) {
+        return { ok: false, bound: false, error: '无法确定本 session' }
+      }
+      const binding = await bindingFor(sessionId)
+      if (binding === null) {
+        return { ok: true, bound: false }
+      }
+      const entries = await readLedger(config.tasksDir, binding.key)
+      const totals = summarizeLedger(entries)
+      return {
+        ok: true,
+        bound: true,
+        key: binding.key,
+        summary: binding.summary,
+        statusName: binding.issueSummary.statusName,
+        priority: binding.issueSummary.priority,
+        assignee: binding.issueSummary.assignee,
+        url: binding.issueSummary.url,
+        totalSeconds: totals.totalSeconds,
+        totalDuration: formatDuration(totals.totalSeconds),
+        draftCount: totals.draftCount,
+        syncedCount: totals.syncedCount,
+        failedCount: totals.failedCount,
+      }
+    },
+  })))
+
+  ctx.effect(() => tools.register(defineTool({
+    name: 'jira_unbind',
+    description: '解除当前 session 与 Jira issue 的绑定（本地工时记录保留）',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          key: { type: 'string' },
+          summary: { type: 'string' },
+          error: { type: 'string' },
+        },
+        additionalProperties: true,
+      } as any,
+      render: (_args, value: any) => [
+        {
+          type: 'text',
+          text: value.ok === false ? `Unbind failed: ${value.error}` : `Unbound from ${value.key}`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const sessionId = sessionOf(args, exec)
+      if (sessionId === null) {
+        return { ok: false, error: '无法确定本 session' }
+      }
+      const r = await handleUnbind({ tasksDir: config.tasksDir }, { sessionId })
+      bindingCache.clear()
+      if (!r.ok) return { ok: false, error: r.error }
+      return { ok: true, key: r.key, summary: r.summary }
     },
   })))
 
@@ -556,6 +1026,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
           summary: detail.summary,
           issueSummary: detail.issueSummary as unknown as Record<string, string>,
           autoWorklog: detail.autoWorklog,
+          startedAtMs: Date.parse(detail.startedAt),
         }
     bindingCache.set(sessionId, { at: now, value })
     return value
@@ -666,6 +1137,10 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         startedAt: localTimestamp(span.startedAt),
         createdAt: localTimestamp(span.endedAt),
       })
+      // The next measured interval starts where this one ended, so the
+      // automatic recorder and a manual `jira_log_worklog` measure from the
+      // same point.
+      lastRecordedAt.set(binding.key, span.endedAt)
     } catch {
       // Recording must never disturb the agent. A ledger write that fails is
       // a missing entry, not a broken turn.
@@ -697,4 +1172,113 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
       }
     })()
   })
+
+  // 8. Commands — the human entry points.
+  //
+  // A command runs against the agent WITHOUT creating a model message: the
+  // user binds a ticket, reads the ledger, or ends a binding, and none of it
+  // enters the conversation. That is the difference between a command and a
+  // tool — a tool is something the model asks for, a command is something a
+  // person asks for, and this session's binding is a person's decision.
+  //
+  // The commands service is optional. A host without it runs the plugin just
+  // fine; it simply offers no slash commands.
+  interface CommandOutcome {
+    kind: 'success' | 'error'
+    text?: string
+  }
+  interface CommandDefinition {
+    name: string
+    description: string
+    input?: { hint: string }
+    handler: (
+      invocation: { agent: { id: string }; rawInput: string },
+    ) => CommandOutcome | Promise<CommandOutcome>
+  }
+  const commands = ctx.get('commands') as {
+    register(definition: CommandDefinition): () => void
+  } | undefined
+
+  if (commands !== undefined) {
+    // /jira-bind [key] — bind this session to an issue.
+    //
+    // With a key it binds straight away. Without one it says what the
+    // session is bound to, and the client decoration turns the bare
+    // invocation into a picker of the open issues.
+    ctx.effect(() => commands.register({
+      name: 'jira-bind',
+      description: '把当前 session 绑定到一个 Jira issue',
+      input: { hint: '<issue-key>' },
+      handler: async (invocation): Promise<CommandOutcome> => {
+        const sessionId = invocation.agent.id
+        const key = invocation.rawInput.trim()
+
+        if (key === '') {
+          const bound = await bindingFor(sessionId)
+          return {
+            kind: 'success',
+            text: bound === null
+              ? '请指定 Jira issue key（如 /jira-bind DZ300-1826），或从命令菜单中选择。'
+              : `本 session 已绑定 ${bound.key}（${bound.summary}）。要换绑请先 /jira-unbind。`,
+          }
+        }
+
+        if (!creds.token) {
+          return { kind: 'error', text: '请先在 Settings 填 Jira credentials' }
+        }
+        try {
+          const r = await handleBind(
+            { jira: makeClient(), creds, tasksDir: config.tasksDir },
+            { sessionId, taskKey: key },
+          )
+          bindingCache.clear()
+          if (!r.ok) return { kind: 'error', text: r.error }
+          return { kind: 'success', text: `已绑定到 ${r.key} — ${r.summary}` }
+        } catch (err) {
+          // A key already held by another session throws rather than
+          // returning — the message says which session holds it.
+          return { kind: 'error', text: (err as Error).message }
+        }
+      },
+    }))
+
+    // /jira-unbind — end the binding, keep the files.
+    ctx.effect(() => commands.register({
+      name: 'jira-unbind',
+      description: '解除当前 session 与 Jira issue 的绑定（本地工时记录保留）',
+      handler: async (invocation): Promise<CommandOutcome> => {
+        const r = await handleUnbind({ tasksDir: config.tasksDir }, { sessionId: invocation.agent.id })
+        bindingCache.clear()
+        if (!r.ok) return { kind: 'error', text: r.error }
+        return { kind: 'success', text: `已解绑 ${r.key} — ${r.summary}（本地工时记录保留）` }
+      },
+    }))
+
+    // /jira-worklog — read the local ledger from the command line.
+    //
+    // The panel is where the upload happens; this is where the numbers are
+    // readable without leaving the conversation.
+    ctx.effect(() => commands.register({
+      name: 'jira-worklog',
+      description: '查看当前 session 绑定 issue 的本地工时账本',
+      handler: async (invocation): Promise<CommandOutcome> => {
+        const binding = await bindingFor(invocation.agent.id)
+        if (binding === null) {
+          return { kind: 'error', text: '本 session 未绑定 Jira issue' }
+        }
+        const entries = await readLedger(config.tasksDir, binding.key)
+        const totals = summarizeLedger(entries)
+        const lines = [
+          `${binding.key} 本地工时账本：${totals.count} 条 · 合计 ${formatDuration(totals.totalSeconds)} · ` +
+          `待传 ${totals.draftCount} · 已同步 ${totals.syncedCount} · 失败 ${totals.failedCount}`,
+        ]
+        for (const e of entries.slice(-10)) {
+          const jira = e.jiraId !== null ? ` (jira ${e.jiraId})` : ''
+          lines.push(`  ${e.startedAt}  ${formatDuration(e.seconds)}  ${e.state}${jira}  ${e.comment}`)
+        }
+        lines.push('上传需在「绑定 Session」面板勾选后确认。')
+        return { kind: 'success', text: lines.join('\n') }
+      },
+    }))
+  }
 }

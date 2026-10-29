@@ -19,6 +19,55 @@ export const inject = ['slots', 'locale'] as const
 
 const NS = 'scjira'
 
+/** One row of the picker's list. */
+interface SelectOption {
+  id: string
+  label: string
+  detail?: string
+  active?: boolean
+}
+
+/**
+ * The slice of the client command UI this plugin uses.
+ *
+ * The service belongs to the harness, not to this plugin, so its shape is
+ * described here rather than imported: the plugin reads it optionally and
+ * keeps working when the host does not provide it.
+ */
+interface CommandUiFace {
+  decorate(decoration: {
+    name: string
+    available: (session: { sessionId: string }) => boolean
+    ui: {
+      kind: 'popupSelect'
+      options: (session: { sessionId: string }) => Promise<readonly SelectOption[]>
+      onSelect: (option: SelectOption, session: { sessionId: string }) => void | Promise<void>
+    }
+  }): () => void
+}
+
+/** The slice of the client remote this plugin uses. */
+interface RemoteFace {
+  commands?: {
+    execute: (
+      sessionId: string,
+      line: string,
+      attachments: readonly unknown[],
+    ) => Promise<{
+      ok: boolean
+      value?: { result: { kind: string; text?: string } }
+      error?: { code: string; message: string }
+    }>
+  }
+}
+
+/** Read a JSON route from the host, with the session cookie attached. */
+async function fetchJson<T>(path: string): Promise<T> {
+  const res = await fetch(path, { credentials: 'include' })
+  if (!res.ok) throw new Error(`${path} failed: ${res.status}`)
+  return await res.json() as T
+}
+
 export function apply(ctx: Context): void {
   // 1. Locale — §6.5 fix: try/catch + single-locale fallback
   try {
@@ -60,4 +109,70 @@ export function apply(ctx: Context): void {
       ScjiraView as never,
     ),
   )
+
+  // 4. The /jira-bind picker.
+  //
+  // The host command binds a session to an issue, and typing the key works.
+  // But remembering issue keys is work, so the bare invocation opens a picker
+  // of the open issues instead.
+  //
+  // The picker does not bind anything itself. It submits a completed command
+  // line, so the binding goes through the same host command a typed key
+  // goes through — one code path, one set of rules, and the session log
+  // records the choice the way it records a typed command.
+  //
+  // Both services are optional. A client without them still shows the panel;
+  // it simply has no picker.
+  const commandUi = ctx.get('commandUi') as CommandUiFace | undefined
+  const remote = ctx.get('remote') as RemoteFace | undefined
+  const executeCommand = remote?.commands
+
+  if (commandUi !== undefined && executeCommand !== undefined) {
+    ctx.effect(() => commandUi.decorate({
+      name: 'jira-bind',
+      available: () => true,
+      ui: {
+        kind: 'popupSelect',
+        options: async (session) => {
+          const data = await fetchJson<{
+            ok?: boolean
+            issues?: Array<{ key: string; summary: string; statusName?: string }>
+            error?: string
+          }>('/api/scjira/open-issues')
+          if (data.ok === false) throw new Error(data.error ?? 'could not load the open issues')
+
+          // The already-bound issue is marked, so the picker shows where this
+          // session stands rather than only where it could go.
+          let currentKey: string | undefined
+          try {
+            const binding = await fetchJson<{ bound?: boolean; key?: string }>(
+              `/api/scjira/get-binding?sessionId=${encodeURIComponent(session.sessionId)}`,
+            )
+            if (binding.bound === true) currentKey = binding.key
+          } catch {
+            // A missing binding is not an error — it just means nothing is
+            // marked, and the list still works.
+          }
+
+          return (data.issues ?? []).map(issue => ({
+            id: issue.key,
+            label: `${issue.key} — ${issue.summary}`,
+            detail: issue.statusName ?? '',
+            active: currentKey === issue.key,
+          }))
+        },
+        onSelect: async (option, session) => {
+          const result = await executeCommand.execute(session.sessionId, `/jira-bind ${option.id}`, [])
+          if (!result.ok) {
+            const code = result.error?.code ?? 'unknown'
+            const message = result.error?.message ?? ''
+            throw new Error(`command.execute failed: ${code}: ${message}`)
+          }
+          if (result.value?.result.kind === 'error') {
+            throw new Error(result.value.result.text ?? 'the bind failed')
+          }
+        },
+      },
+    }))
+  }
 }

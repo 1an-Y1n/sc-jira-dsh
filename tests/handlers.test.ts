@@ -7,9 +7,13 @@ import {
   handleListWorklogWeek,
   handleGetBinding,
   handleBind,
+  handleIssue,
+  handleAddComment,
+  handleUnbind,
   searchAllIssues,
   SEARCH_PAGE_SIZE,
 } from '../src/handlers.js'
+import { writeMetaWithBinding } from '../src/storage.js'
 import type { ScjiraSettings } from '../src/types.js'
 
 const creds: ScjiraSettings = {
@@ -23,11 +27,15 @@ function makeFakeJiraClient(impl: Partial<{
   issue: any
   worklogs: any
   search: any
+  comments: any
+  addComment: any
 }> = {}) {
   return {
     issue: impl.issue ?? (async () => ({ ok: false, error: 'http' })),
     worklogs: impl.worklogs ?? (async () => ({ ok: false, error: 'http' })),
     search: impl.search ?? (async () => ({ ok: false, error: 'http' })),
+    comments: impl.comments ?? (async () => ({ ok: false, error: 'http' })),
+    addComment: impl.addComment ?? (async () => ({ ok: false, error: 'http' })),
   } as any
 }
 
@@ -346,3 +354,114 @@ describe('handleListMyOpen pagination', () => {
   })
 })
 
+
+describe('handleIssue', () => {
+  it('returns the issue with its comments', async () => {
+    const jira = makeFakeJiraClient({
+      issue: async () => ({
+        ok: true,
+        body: { key: 'DZ300-797', id: '1', fields: { summary: 'The issue', description: 'The body', status: { name: 'Open' } } },
+      }),
+      comments: async () => ({
+        ok: true,
+        body: {
+          startAt: 0, maxResults: 50, total: 1,
+          comments: [{ id: '10', author: { displayName: 'Ian Yin' }, created: 'c', updated: 'u', body: 'a comment' }],
+        },
+      }),
+    })
+    const r = await handleIssue({ jira, creds }, { key: 'DZ300-797' })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.issue.summary).toBe('The issue')
+      expect(r.issue.description).toBe('The body')
+      expect(r.issue.comments).toHaveLength(1)
+      expect(r.issue.comments[0]?.author).toBe('Ian Yin')
+    }
+  })
+
+  it('rejects an invalid key before calling Jira', async () => {
+    const r = await handleIssue({ jira: makeFakeJiraClient(), creds }, { key: 'nope' })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Invalid issue key format')
+  })
+
+  it('reports a failure to read the issue', async () => {
+    const jira = makeFakeJiraClient({ issue: async () => ({ ok: false, error: 'auth' }) })
+    const r = await handleIssue({ jira, creds }, { key: 'DZ300-797' })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('auth')
+  })
+
+  it('keeps the issue when the comments cannot be read', async () => {
+    const jira = makeFakeJiraClient({
+      issue: async () => ({ ok: true, body: { key: 'DZ300-797', id: '1', fields: { summary: 'S' } } }),
+      comments: async () => ({ ok: false, error: 'http' }),
+    })
+    const r = await handleIssue({ jira, creds }, { key: 'DZ300-797' })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.issue.summary).toBe('S')
+      expect(r.issue.comments).toEqual([])
+    }
+  })
+})
+
+describe('handleAddComment', () => {
+  it('adds a comment', async () => {
+    const jira = makeFakeJiraClient({
+      addComment: async () => ({ ok: true, body: { id: '10', author: { displayName: 'Ian Yin' }, created: 'c', updated: 'u', body: 'done' } }),
+    })
+    const r = await handleAddComment({ jira }, { key: 'DZ300-797', body: 'done' })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.comment.id).toBe('10')
+  })
+
+  it('rejects an empty body before calling Jira', async () => {
+    const r = await handleAddComment({ jira: makeFakeJiraClient() }, { key: 'DZ300-797', body: '  ' })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('comment body is empty')
+  })
+
+  it('reports a Jira rejection', async () => {
+    const jira = makeFakeJiraClient({ addComment: async () => ({ ok: false, error: 'http', detail: 'status 400' }) })
+    const r = await handleAddComment({ jira }, { key: 'DZ300-797', body: 'done' })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('status 400')
+  })
+})
+
+describe('handleUnbind', () => {
+  it('ends the binding and keeps the files', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'scjira-unbind-'))
+    try {
+      await writeMetaWithBinding(dir, {
+        key: 'DZ300-797',
+        sessionId: 'agent-abc',
+        issueSummary: { summary: 'S', statusName: 'Open' },
+      })
+      const r = await handleUnbind({ tasksDir: dir }, { sessionId: 'agent-abc' })
+      expect(r.ok).toBe(true)
+      if (r.ok) expect(r.key).toBe('DZ300-797')
+      const after = await handleGetBinding({ tasksDir: dir }, { sessionId: 'agent-abc' })
+      expect(after.bound).toBe(false)
+      // The task directory survives — the history belongs to the work.
+      const { readdir } = await import('node:fs/promises')
+      const entries = await readdir(dir)
+      expect(entries).toContain('DZ300-797')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports that nothing was bound', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'scjira-unbind-'))
+    try {
+      const r = await handleUnbind({ tasksDir: dir }, { sessionId: 'agent-none' })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.error).toContain('not bound')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})

@@ -115,6 +115,21 @@ interface RawSearchPage {
   issues: Array<{ key: string; id: string; fields: Record<string, unknown> }>
 }
 
+interface RawComment {
+  id: string
+  author?: { displayName?: string; name?: string }
+  created: string
+  updated: string
+  body: string
+}
+
+interface RawCommentPage {
+  startAt: number
+  maxResults: number
+  total: number
+  comments: RawComment[]
+}
+
 export class JiraClient {
   private creds: ScjiraSettings
   private spawn: SpawnFn
@@ -241,6 +256,69 @@ export class JiraClient {
     const bad = this.classify(status, body)
     if (bad) return bad
     return this.tryParse<RawSearchPage>(body)
+  }
+
+  // --- comments ------------------------------------------------------------
+  //
+  // Jira Server's comment API:
+  //   GET  /rest/api/2/issue/{key}/comment      → a page of comments
+  //   POST /rest/api/2/issue/{key}/comment      → 201, body = the comment
+  //
+  // `body` is plain text on Jira Server (Atlassian Document Format only
+  // arrives on Jira Cloud), so the string is sent as-is.
+
+  /**
+   * Read an issue's comments.
+   * @param key - issue key, e.g. `DZ300-797`.
+   * @param opts.startAt - first comment to read.
+   * @param opts.maxResults - page size.
+   * @returns one page of comments, or the failure kind.
+   */
+  async comments(
+    key: string,
+    opts: { startAt?: number; maxResults?: number; signal?: AbortSignal } = {},
+  ): Promise<JiraResult<RawCommentPage>> {
+    if (!KEY_RE.test(key)) {
+      return { ok: false, error: 'http', detail: 'invalid key format' }
+    }
+    const params = new URLSearchParams({
+      startAt: String(opts.startAt ?? 0),
+      maxResults: String(opts.maxResults ?? this.defaultSearchMaxResults),
+    })
+    const { status, body } = await this.curl(
+      apiUrl(this.creds.server, `/issue/${key}/comment?${params.toString()}`),
+      opts.signal,
+    )
+    const bad = this.classify(status, body)
+    if (bad) return bad
+    return this.tryParse<RawCommentPage>(body)
+  }
+
+  /**
+   * Add a comment to an issue.
+   * @param key - issue key.
+   * @param body - the comment text.
+   * @returns the created comment, or the failure kind.
+   */
+  async addComment(
+    key: string,
+    body: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<JiraResult<RawComment>> {
+    if (!KEY_RE.test(key)) {
+      return { ok: false, error: 'http', detail: 'invalid key format' }
+    }
+    if (body.trim() === '') {
+      return { ok: false, error: 'http', detail: 'empty comment body' }
+    }
+    const { status, body: raw } = await this.curl(
+      apiUrl(this.creds.server, `/issue/${key}/comment`),
+      opts.signal,
+      { method: 'POST', body: { body } },
+    )
+    const bad = this.classify(status, raw)
+    if (bad) return bad
+    return this.tryParse<RawComment>(raw)
   }
 
   // --- worklog writes ------------------------------------------------------

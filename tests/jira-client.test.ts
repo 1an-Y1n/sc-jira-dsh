@@ -394,6 +394,60 @@ describe('JiraClient worklog writes', () => {
     expect(idx).toBeGreaterThan(-1)
     expect(args[idx - 1]).toBe('-H')
   })
+
+  it('comments() returns the page on 200 JSON', async () => {
+    const body = JSON.stringify({
+      startAt: 0,
+      maxResults: 50,
+      total: 1,
+      comments: [{ id: '10', author: { displayName: 'Ian Yin' }, created: '2026-10-26T09:00:00.000+0800', updated: '2026-10-26T09:00:00.000+0800', body: 'hello' }],
+    })
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body }) })
+    const r = await client.comments('DZ300-797')
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.body.comments[0]?.body).toBe('hello')
+  })
+
+  it('comments() requests the issue comment endpoint', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    await client.comments('DZ300-797')
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    const url = args[args.length - 1] ?? ''
+    expect(url).toContain(`/rest/api/${API_VERSION}/issue/DZ300-797/comment`)
+  })
+
+  it('comments() rejects an invalid key without calling Jira', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    const r = await client.comments('nope')
+    expect(r.ok).toBe(false)
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+
+  it('addComment() POSTs the comment body', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: '{"id":"10","body":"done"}' }) })
+    const r = await client.addComment('DZ300-797', 'done')
+    expect(r.ok).toBe(true)
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    expect(args).toContain('POST')
+    const url = args[args.length - 1] ?? ''
+    expect(url).toContain(`/rest/api/${API_VERSION}/issue/DZ300-797/comment`)
+    const payload = args[args.indexOf('--data-binary') + 1] ?? ''
+    expect(JSON.parse(payload)).toEqual({ body: 'done' })
+  })
+
+  it('addComment() rejects an empty body without calling Jira', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: '{}' }) })
+    const r = await client.addComment('DZ300-797', '   ')
+    expect(r.ok).toBe(false)
+    expect(mockSpawn).not.toHaveBeenCalled()
+  })
+
+  it('addComment() surfaces an auth failure', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 401, body: 'Unauthorized' }) })
+    const r = await client.addComment('DZ300-797', 'done')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('auth')
+  })
 })
 
 // Helper: returns the mockSpawn fn, configured to resolve to a fake curl result.

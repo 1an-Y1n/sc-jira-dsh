@@ -4,31 +4,50 @@ DSH static plugin. Adds Jira integration:
 
 - **Settings card** (`设置 → Jira`): fill server / login / API token / display name / proxy
 - **Conversation view** (tab next to Trajectory): 3 sub-tabs — 我的未完成 / Worklog 周报 / 绑定 Session
-- **Tools exposed to agent**: `jira_list_my_open`, `jira_list_worklog_week(startDate?)`, `jira_get_binding(sessionId)`, `jira_bind(sessionId, taskKey)`
-- **HTTP routes** (all under `/api/scjira/*`): `status`, `config`, `list-my-open`, `list-worklog-week`, `get-binding`, `bind`
+- **Tools exposed to agent** (12): `jira_list_my_open`, `jira_list_worklog_week(startDate?)`,
+  `jira_get_binding`, `jira_bind`, `jira_summarize`, `jira_issue`, `jira_log_worklog`,
+  `jira_worklogs`, `jira_upload_worklogs`, `jira_comment`, `jira_current`, `jira_unbind`
+- **Commands** (3): `/jira-bind [key]`, `/jira-unbind`, `/jira-worklog` — a command runs against
+  the agent **without** creating a model message, so binding a ticket never enters the conversation
+- **HTTP routes** (all under `/api/scjira/*`): `status`, `config`, `list-my-open`, `open-issues`,
+  `list-worklog-week`, `get-binding`, `bind`, `worklog`, `worklog/edit`, `worklog/upload`,
+  `worklog/repull`
 
 The original spec called for 3 right-sidebar sub-tabs, but `@deepseek-ai/dsh-client-ui-sidebar-right` is **not bundled** in the default dsh web profile — `ctx.sidebarRightTabs` never resolves. The plugin therefore mounts a `conversation.view` entry (the tab next to Trajectory) that carries the same 3 sub-tabs, plus a `settings.section` card for the credentials.
 
 ## Status
 
-The current implementation is **v2**: read-only Jira views plus a manual binding record.
+The current implementation is **v3**: a bound session carries its Jira ticket into the agent's
+context and records the time it spent locally.
 
-The binding does **not** yet constrain the agent's context, and nothing is written back to
-Jira — `JiraClient` only issues GETs. The design for closing both gaps (context scoping
-via `tools/pre-execute` / `agent/pre-step`, and automatic worklog via
-`agent/turn-stopping`) is in **[docs/design/v3-session-binding.md](docs/design/v3-session-binding.md)**.
+What that means in practice:
+
+- **Context scoping** — once bound, every step injects the ticket's identity, and a tool call
+  that reaches for a *different* ticket attaches a note (or is refused, in `narrow` mode).
+- **Local-first worklog** — a turn's wall-clock time is appended to `worklog.jsonl` when the
+  turn closes. **Nothing is uploaded automatically.** The entries stay `draft` until a person
+  reviews them in the 绑定 Session panel, ticks the ones that should go to the tracker, and
+  uploads them. The upload is the review's outcome, not the recorder's decision.
+- **Editable time** — a duration, a start time and a note can be changed locally; an entry that
+  is already synced is changed on Jira too, and 「从 Jira 重新拉取」 reconciles the two sides.
+- **Bidirectional 1:1** — a ticket and a session hold each other exclusively; changing one
+  requires `/jira-unbind` first.
+
+The design this implements is **[docs/design/v3-session-binding.md](docs/design/v3-session-binding.md)**.
 
 Historical specs are archived in `docs/specs/` — the v2 runtime was lost on 2026-09-17 and
 that document was its only surviving source of truth.
 
 ## Architecture
 
-- **Host** (`src/index.ts`): registers the `scjira` settings namespace + 6 HTTP routes + 4 tools, all wrapped in `ctx.effect()` for dispose
+- **Host** (`src/index.ts`): registers the `scjira` settings namespace + 8 HTTP route prefixes + 12 tools + 3 commands, all wrapped in `ctx.effect()` for dispose
 - **Timezone** (`src/timezone.ts`): shared calendar-day/week arithmetic in `Asia/Shanghai`, used by both host and client
-- **Storage** (`src/storage.ts`): schema-versioned `meta.json` (schemaVersion=3) + token persisted with `role('secret')` via `@deepseek-ai/schemastery`
+- **Storage** (`src/storage.ts`): schema-versioned `meta.json` (schemaVersion=4) + a derived bidirectional `.index.json`, plus the token persisted with `role('secret')` via `@deepseek-ai/schemastery`
 - **JiraClient** (`src/jira-client.ts`): calls Jira REST via `ctx.subprocess.spawn('curl', ...)` (DSH Node sandbox disables `fetch`)
-- **Handlers** (`src/handlers.ts`): 4 pure functions (listMyOpen, listWorklogWeek, getBinding, bind) + a paginating `searchAllIssues` helper
-- **Client** (`src/client/`): locale dictionary + Settings card UI + conversation view (3 sub-tab panels)
+- **Handlers** (`src/handlers.ts`): pure functions for the reads and writes (listMyOpen, listWorklogWeek, getBinding, bind, issue, comment, unbind) + a paginating `searchAllIssues` helper
+- **Worklog** (`src/worklog-ledger.ts`, `src/worklog-handlers.ts`): the local ledger and its review/edit/upload/repull operations
+- **Scope** (`src/scope.ts`): which tools name an issue, and what reaching outside the bound one means
+- **Client** (`src/client/`): locale dictionary + Settings card UI + conversation view (3 sub-tab panels) + the `/jira-bind` issue picker
 
 ## Install
 

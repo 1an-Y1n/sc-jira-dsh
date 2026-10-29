@@ -35,10 +35,18 @@ export interface TurnSpan {
  *
  * @param elapsedMs - the measured wall-clock duration.
  * @param policy - the binding's automatic-worklog policy.
+ * @param opts.requireEnabled - whether the policy's on/off switch applies.
+ *   Automatic recording honours it; a caller that measured the time itself
+ *   and asked for it to be recorded does not — the switch governs recording
+ *   that happens without being asked for.
  * @returns the seconds to record, or null when the turn is too short to count.
  */
-export function secondsToRecord(elapsedMs: number, policy: AutoWorklogConfig): number | null {
-  if (!policy.enabled) return null
+export function secondsToRecord(
+  elapsedMs: number,
+  policy: AutoWorklogConfig,
+  opts: { requireEnabled?: boolean } = {},
+): number | null {
+  if (opts.requireEnabled !== false && !policy.enabled) return null
   const seconds = elapsedMs / 1000
   if (seconds < policy.minSeconds) return null
   const capped = Math.min(seconds, policy.maxSecondsPerTurn)
