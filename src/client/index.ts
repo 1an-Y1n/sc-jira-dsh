@@ -46,19 +46,28 @@ interface CommandUiFace {
   }): () => void
 }
 
-/** The slice of the client remote this plugin uses. */
-interface RemoteFace {
-  commands?: {
-    execute: (
-      sessionId: string,
-      line: string,
-      attachments: readonly unknown[],
-    ) => Promise<{
-      ok: boolean
-      value?: { result: { kind: string; text?: string } }
-      error?: { code: string; message: string }
-    }>
-  }
+/**
+ * The slice of the client remote this plugin uses.
+ *
+ * `remote.commands` is a service in its OWN right, not a property of the
+ * remote registry: reading it as `remote.commands` walks Cordis's guarded
+ * property path, and a plugin that has not declared it in `inject` gets
+ * "cannot get property ... without inject" — which fails the WHOLE client
+ * half, taking the settings card and the view tab down with it. Looking it
+ * up by its own key keeps the lookup optional, so a host without the command
+ * surface simply has no picker and the rest of the plugin still works.
+ */
+interface CommandsRemote {
+  execute: (
+    agentId: string,
+    line: string,
+    images: readonly unknown[],
+    signal?: AbortSignal,
+  ) => Promise<{
+    ok: boolean
+    value?: { result: { kind: string; text?: string } }
+    error?: { code: string; message: string }
+  }>
 }
 
 /** Read a JSON route from the host, with the session cookie attached. */
@@ -122,10 +131,10 @@ export function apply(ctx: Context): void {
   // records the choice the way it records a typed command.
   //
   // Both services are optional. A client without them still shows the panel;
-  // it simply has no picker.
+  // it simply has no picker. Neither lookup may take the plugin down: the
+  // picker is an extra, not the product.
   const commandUi = ctx.get('commandUi') as CommandUiFace | undefined
-  const remote = ctx.get('remote') as RemoteFace | undefined
-  const executeCommand = remote?.commands
+  const executeCommand = ctx.get('remote.commands') as CommandsRemote | undefined
 
   if (commandUi !== undefined && executeCommand !== undefined) {
     ctx.effect(() => commandUi.decorate({

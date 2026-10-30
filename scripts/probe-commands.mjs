@@ -36,6 +36,16 @@ const statusOk = statusResp.ok() && statusBody.ok === true
 // per-agent, so there must be an agent to list commands for.
 await page.goto(BASE, { waitUntil: 'networkidle', timeout: 30000 })
 await page.waitForTimeout(1500)
+
+// A plugin whose client half fails to apply takes the WHOLE page down with
+// it — the harness shows "Failed to load plugins" instead of the app. That
+// failure is loud here rather than as a missing command row much later.
+const loadFailure = await page.evaluate(() => {
+  const text = document.body.innerText ?? ''
+  const m = /failed to apply loader entry[^\n]*/i.exec(text)
+  return m?.[0] ?? (text.includes('Failed to load plugins') ? 'Failed to load plugins' : '')
+})
+
 for (const sel of ['text=创建JIRA插件', 'text=DSH工具执行Shell命令实现', '[class*="sessionRow"]']) {
   const l = page.locator(sel).first()
   if (await l.count() && await l.isVisible()) {
@@ -100,6 +110,7 @@ const pickerOpen = pickerOptions.length > 0
 
 const report = {
   statusOk,
+  loadFailure,
   composerFound,
   menuRows,
   bindListed,
@@ -114,6 +125,6 @@ console.log(JSON.stringify(report, null, 2))
 
 await browser.close()
 
-const pass = statusOk && composerFound && bindListed && unbindListed && worklogListed
-  && pickerOpen && consoleErrors.length === 0
+const pass = statusOk && loadFailure === '' && composerFound && bindListed && unbindListed
+  && worklogListed && pickerOpen && consoleErrors.length === 0
 process.exit(pass ? 0 : 2)
