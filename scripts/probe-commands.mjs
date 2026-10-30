@@ -11,11 +11,42 @@
  * halves.
  */
 import { chromium } from 'playwright'
-import { writeFile, mkdir } from 'node:fs/promises'
+import { writeFile, mkdir, readdir, readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { launchOptions } from './chrome.mjs'
 
 const BASE = process.env.DSH_BASE ?? 'http://127.0.0.1:3092'
 const OUT_DIR = process.env.OUT_DIR ?? '/tmp/sc-jira-cmd-test'
+const TASKS_DIR = process.env.SCJIRA_TASKS_DIR
+  ?? join(homedir(), '.dsh', 'profiles', 'web', 'scjira', 'tasks')
+
+/**
+ * The bindings on disk, as `{ key: sessionId }` for the ACTIVE ones.
+ *
+ * The probe reads the plugin's own storage to prove the command really
+ * wrote a binding — the picker's own "active" marker would be the plugin
+ * agreeing with itself.
+ */
+async function activeBindings() {
+  const out = {}
+  let dirs = []
+  try {
+    dirs = await readdir(TASKS_DIR, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const d of dirs) {
+    if (!d.isDirectory() || d.name.startsWith('.')) continue
+    try {
+      const meta = JSON.parse(await readFile(join(TASKS_DIR, d.name, 'meta.json'), 'utf8'))
+      if (meta.status === 'active') out[meta.key] = meta.dshSessionId
+    } catch {
+      // A directory without a readable meta.json is not a binding.
+    }
+  }
+  return out
+}
 
 await mkdir(OUT_DIR, { recursive: true })
 
@@ -108,6 +139,36 @@ const pickerOptions = await page.evaluate(() => {
 })
 const pickerOpen = pickerOptions.length > 0
 
+// Step 5: pick the first issue. The picker submits a completed command line
+// (`/jira-bind DZ300-XXXX`), so the HOST command does the binding — this
+// exercises the whole path: popup → remote → host command → meta.json.
+const before = await activeBindings()
+const firstOption = page.locator('button, [role="option"], li')
+  .filter({ hasText: /[A-Z][A-Z0-9_]*-\d+/ })
+  .first()
+await firstOption.click({ timeout: 6000 }).catch(() => {})
+await page.waitForTimeout(4000)
+await page.screenshot({ path: `${OUT_DIR}/05-bound.png`, fullPage: true })
+
+const after = await activeBindings()
+const boundKeys = Object.keys(after).filter(k => !(k in before))
+const bindWrote = boundKeys.length > 0
+const boundKey = boundKeys[0] ?? ''
+
+// Step 6: unbind through the command, and prove the binding is gone. A
+// probe that leaves a binding behind is a probe that pollutes the next run.
+const composer2 = page.locator('textarea, [contenteditable="true"]').first()
+await composer2.click({ timeout: 5000 }).catch(() => {})
+await page.waitForTimeout(400)
+await page.keyboard.type('/jira-unbind', { delay: 120 })
+await page.waitForTimeout(1200)
+await page.keyboard.press('Enter')
+await page.waitForTimeout(3500)
+await page.screenshot({ path: `${OUT_DIR}/06-unbound.png`, fullPage: true })
+
+const afterUnbind = await activeBindings()
+const unbound = !Object.values(afterUnbind).includes(after[boundKey] ?? ' ')
+
 const report = {
   statusOk,
   loadFailure,
@@ -118,6 +179,10 @@ const report = {
   worklogListed,
   pickerOpen,
   pickerOptions,
+  bindWrote,
+  boundKey,
+  unbound,
+  afterUnbind,
   consoleErrors,
 }
 await writeFile(`${OUT_DIR}/report.json`, JSON.stringify(report, null, 2))
@@ -126,5 +191,5 @@ console.log(JSON.stringify(report, null, 2))
 await browser.close()
 
 const pass = statusOk && loadFailure === '' && composerFound && bindListed && unbindListed
-  && worklogListed && pickerOpen && consoleErrors.length === 0
+  && worklogListed && pickerOpen && bindWrote && unbound && consoleErrors.length === 0
 process.exit(pass ? 0 : 2)

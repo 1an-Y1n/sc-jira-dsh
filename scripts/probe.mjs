@@ -33,7 +33,9 @@ const statusOk = statusResp.ok() && statusBody.ok === true
 // Step 2: open + enter session
 await page.goto(BASE, { waitUntil: 'networkidle', timeout: 30000 })
 await page.waitForTimeout(1500)
-for (const sel of ['text=创建JIRA插件', 'text=DSH工具执行Shell命令实现', '[class*="sessionRow"]']) {
+// The first two name the sessions this machine happened to create; the last
+// is the generic fallback, so the probe also works on a fresh profile.
+for (const sel of ['text=创建JIRA插件', 'text=DSH工具执行Shell命令实现', '[class*="sessionRow"]', 'text=新会话']) {
   const l = page.locator(sel).first()
   if (await l.count() && await l.isVisible()) {
     await l.click({ timeout: 3000 }).catch(() => {})
