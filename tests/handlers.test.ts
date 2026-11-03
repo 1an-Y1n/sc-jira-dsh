@@ -11,6 +11,7 @@ import {
   handleAddComment,
   handleUnbind,
   searchAllIssues,
+  issueBrowseUrl,
   SEARCH_PAGE_SIZE,
 } from '../src/handlers.js'
 import { writeMetaWithBinding } from '../src/storage.js'
@@ -131,8 +132,33 @@ describe('handleListWorklogWeek', () => {
     }
   })
 
-  it('paginates worklogs fully (no silent truncation)', async () => {
-    let callCount = 0
+  it('gives every week row the browsable address of its issue', async () => {
+    // The week table links the issue key, so the row has to carry the
+    // address: the client never learns the Jira base URL on its own.
+    const jira = makeFakeJiraClient({
+      search: async () => ({
+        ok: true,
+        body: { issues: [{ key: 'DZ300-1', id: '1', fields: { summary: 'Task' } }] },
+      }),
+      worklogs: async () => ({
+        ok: true,
+        body: {
+          startAt: 0, maxResults: 1000, total: 1,
+          worklogs: [
+            { id: '1', author: { displayName: 'Ian Yin' }, started: '2026-09-08T09:00:00.000+0800', timeSpentSeconds: 3600, comment: 'mine' },
+          ],
+        },
+      }),
+    })
+    const r = await handleListWorklogWeek({ jira, creds }, { startDate: '2026-09-07' })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const entries = r.dailyTotals?.['2026-09-08']?.entries ?? []
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.url).toBe('https://jiratest.example.com/browse/DZ300-1')
+  })
+
+  it('paginates worklogs fully (no silent truncation)', async () => {    let callCount = 0
     const jira = makeFakeJiraClient({
       search: async () => ({ ok: true, body: { issues: [{ key: 'DZ300-1', id: '1', fields: { summary: 'X' } }] } }),
       worklogs: async (key: string, opts: any) => {
@@ -463,5 +489,19 @@ describe('handleUnbind', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('issueBrowseUrl', () => {
+  it('builds the Jira Server issue permalink', () => {
+    expect(issueBrowseUrl('https://jira.example.com', 'DZ300-1'))
+      .toBe('https://jira.example.com/browse/DZ300-1')
+  })
+
+  it('trims trailing slashes, so a configured host with one still links', () => {
+    expect(issueBrowseUrl('https://jira.example.com/', 'DZ300-1'))
+      .toBe('https://jira.example.com/browse/DZ300-1')
+    expect(issueBrowseUrl('https://jira.example.com///', 'DZ300-1'))
+      .toBe('https://jira.example.com/browse/DZ300-1')
   })
 })

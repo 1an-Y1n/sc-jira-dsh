@@ -34,6 +34,7 @@ import {
   handleIssue,
   handleAddComment,
   handleUnbind,
+  issueBrowseUrl,
 } from './handlers.js'
 import { readBindingDetailBySession } from './storage.js'
 import {
@@ -265,8 +266,11 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
           const u = new URL(url, 'http://x')
           const sid = u.searchParams.get('sessionId') ?? ''
           const r = await handleGetBinding({ tasksDir: config.tasksDir }, { sessionId: sid })
+          // The bound issue's browsable address, computed from the CURRENT
+          // server configuration — the stored one may predate a change.
+          const boundUrl = r.bound && r.key !== undefined ? issueBrowseUrl(creds.server, r.key) : undefined
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, ...r }))
+          res.end(JSON.stringify({ ok: true, ...r, ...(boundUrl !== undefined ? { url: boundUrl } : {}) }))
           return
         }
         if (route === 'bind' && method === 'POST') {
@@ -957,7 +961,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         statusName: binding.issueSummary.statusName,
         priority: binding.issueSummary.priority,
         assignee: binding.issueSummary.assignee,
-        url: binding.issueSummary.url,
+        url: issueBrowseUrl(creds.server, binding.key),
         totalSeconds: totals.totalSeconds,
         totalDuration: formatDuration(totals.totalSeconds),
         draftCount: totals.draftCount,

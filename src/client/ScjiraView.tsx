@@ -46,6 +46,8 @@ interface GetBindingResponse {
   key?: string
   summary?: string
   sessionId?: string
+  /** The bound issue's browsable address on the configured Jira Server. */
+  url?: string
 }
 
 interface ScjiraRuntime {
@@ -474,7 +476,16 @@ function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson
               <tr key={`${l.date}-${i}`}>
                 <td style={{ ...tdStyle, color: FG_MUTED, whiteSpace: 'nowrap' }}>{l.date}</td>
                 <td style={tdStyle}>
-                  <a href={`#${e.issueKey}`} style={{ color: ACCENT_BAR, textDecoration: 'none' }}>
+                  {/* The issue key opens the issue on the Jira Server. The
+                      address comes from the Host, which owns the server
+                      configuration — a same-page anchor would just move the
+                      DSH page's hash instead. */}
+                  <a
+                    href={e.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: ACCENT_BAR, textDecoration: 'none' }}
+                  >
                     {e.issueKey}
                   </a>
                 </td>
@@ -541,7 +552,22 @@ function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraVi
         borderRadius: 4,
       }}>
         {data?.bound
-          ? <span>当前 session 绑定到 <strong>{data.key}</strong> · {data.summary}</span>
+          ? (
+            <span>
+              当前 session 绑定到{' '}
+              {data.url !== undefined ? (
+                <a
+                  href={data.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: ACCENT, fontWeight: 600, textDecoration: 'none' }}
+                >
+                  {data.key}
+                </a>
+              ) : <strong>{data.key}</strong>}
+              {' · '}{data.summary}
+            </span>
+          )
           : <span style={{ color: FG_MUTED }}>当前 session 未绑定</span>}
       </div>
       <div style={{ display: 'flex', gap: 8 }}>

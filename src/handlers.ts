@@ -16,6 +16,18 @@ import { addDays, mondayOf, todayIso } from './timezone.js'
 
 // --- helpers ---------------------------------------------------------------
 
+/**
+ * The browsable address of an issue on the configured Jira Server.
+ *
+ * The `/browse/<key>` form is Jira Server's own issue permalink — the
+ * instance serves it from the web UI, not the REST API — and the trailing
+ * slashes are trimmed so a configured `https://host/` and `https://host`
+ * produce the same link.
+ */
+export function issueBrowseUrl(server: string, key: string): string {
+  return `${server.replace(/\/+$/, '')}/browse/${key}`
+}
+
 function summarizeRawIssue(
   raw: { key: string; id: string; fields: Record<string, any> },
   worklogs: WorklogEntry[],
@@ -39,7 +51,7 @@ function summarizeRawIssue(
     timeSpentSeconds: f.timespent ?? 0,
     originalEstimateSeconds: f.timeoriginalestimate ?? 0,
     remainingEstimateSeconds: f.timeestimate ?? 0,
-    url: `${server.replace(/\/+$/, '')}/browse/${raw.key}`,
+    url: issueBrowseUrl(server, raw.key),
     worklogs,
   }
 }
@@ -211,6 +223,9 @@ export async function handleListWorklogWeek(
       day.seconds += w.timeSpentSeconds
       day.entries.push({
         issueKey: issue.key,
+        // The week rows link the issue key, so the row carries the browsable
+        // address with it — the client never has to know the Jira base URL.
+        url: issueBrowseUrl(deps.creds.server, issue.key),
         issueSummary,
         started: w.started,
         timeSpentSeconds: w.timeSpentSeconds,

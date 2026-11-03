@@ -35,6 +35,8 @@ export interface DayTotal {
   seconds: number
   entries: Array<{
     issueKey: string
+    /** The issue's browsable address on the configured Jira Server. */
+    url: string
     issueSummary: string
     started: string
     timeSpentSeconds: number
