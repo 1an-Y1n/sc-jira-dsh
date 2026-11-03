@@ -184,6 +184,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
           login: creds.login,
           displayName: creds.displayName,
           proxy: creds.proxy,
+          scopeMode: creds.scopeMode,
         }))
         return
       }
@@ -194,12 +195,17 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         req.on('data', c => { body += c })
         req.on('end', async () => {
           try {
-            const parsed = JSON.parse(body) as { server?: string; login?: string; displayName?: string; token?: string; proxy?: string }
+            const parsed = JSON.parse(body) as { server?: string; login?: string; displayName?: string; token?: string; proxy?: string; scopeMode?: string }
             const ops: Array<{ op: 'set'; path: string[]; value: string }> = []
             if (parsed.server !== undefined) ops.push({ op: 'set', path: ['server'], value: parsed.server })
             if (parsed.login !== undefined) ops.push({ op: 'set', path: ['login'], value: parsed.login })
             if (parsed.displayName !== undefined) ops.push({ op: 'set', path: ['displayName'], value: parsed.displayName })
             if (parsed.proxy !== undefined) ops.push({ op: 'set', path: ['proxy'], value: parsed.proxy })
+            // Only an accepted mode is written: an unknown string would sit in
+            // the namespace and read back as advisory anyway.
+            if (parsed.scopeMode === 'narrow' || parsed.scopeMode === 'advisory') {
+              ops.push({ op: 'set', path: ['scopeMode'], value: parsed.scopeMode })
+            }
             // Only write token if user supplied one (preserves existing on empty)
             if (parsed.token) ops.push({ op: 'set', path: ['token'], value: parsed.token })
             await settings.mutate('scjira' as never, ops)
@@ -215,6 +221,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
               login: saved.login,
               displayName: saved.displayName,
               proxy: saved.proxy,
+              scopeMode: saved.scopeMode,
             }))
           } catch (err) {
             res.writeHead(400, { 'content-type': 'application/json' })

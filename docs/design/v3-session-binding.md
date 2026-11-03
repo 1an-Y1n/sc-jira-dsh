@@ -566,6 +566,12 @@ ctx.commandUi.register({
 }
 ```
 
+配置的入口是 **设置 → 插件 → 插件配置 → Jira** 这张卡片：用 DSH 为外部插件预留的
+`settings.plugin.item` 槽位，key 就是 Host 注册的 settings namespace（`scjira`）。卡片因此与
+Bash / Agent Loop 等插件配置卡片并列，长在同一个 tab 里；设置左侧不再单独开一页，也就不会再出现
+一个与 Jira 无关的通用齿轮图标。卡片自身带 Jira 标识，样式全部走 `--dsw-alias-*` token，
+与其它插件配置卡片同一套几何。
+
 ---
 
 ## 13. 实施顺序

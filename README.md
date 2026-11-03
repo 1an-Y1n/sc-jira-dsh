@@ -2,7 +2,8 @@
 
 DSH static plugin. Adds Jira integration:
 
-- **Settings card** (`设置 → Jira`): fill server / login / API token / display name / proxy
+- **Configuration card** (`设置 → 插件 → 插件配置 → Jira`): server / login / API token / display name /
+  proxy / 越界策略 — a plugin card beside the harness's own, carrying the Jira mark
 - **Conversation view** (tab next to Trajectory): 3 sub-tabs — 我的未完成 / Worklog 周报 / 绑定 Session
 - **Tools exposed to agent** (12): `jira_list_my_open`, `jira_list_worklog_week(startDate?)`,
   `jira_get_binding`, `jira_bind`, `jira_summarize`, `jira_issue`, `jira_log_worklog`,
@@ -13,7 +14,9 @@ DSH static plugin. Adds Jira integration:
   `list-worklog-week`, `get-binding`, `bind`, `worklog`, `worklog/edit`, `worklog/upload`,
   `worklog/repull`
 
-The original spec called for 3 right-sidebar sub-tabs, but `@deepseek-ai/dsh-client-ui-sidebar-right` is **not bundled** in the default dsh web profile — `ctx.sidebarRightTabs` never resolves. The plugin therefore mounts a `conversation.view` entry (the tab next to Trajectory) that carries the same 3 sub-tabs, plus a `settings.section` card for the credentials.
+The original spec called for 3 right-sidebar sub-tabs, but `@deepseek-ai/dsh-client-ui-sidebar-right` is **not bundled** in the default dsh web profile — `ctx.sidebarRightTabs` never resolves. The plugin therefore mounts a `conversation.view` entry (the tab next to Trajectory) that carries the same 3 sub-tabs, plus a `settings.plugin.item` card for the credentials.
+
+The configuration card lives in the **Plugins** section, not in a settings section of its own. DSH reserves `settings.plugin.item` for plugins that live outside the harness repository: the card is keyed by the settings namespace the Host registers (`scjira`), and the tab pairs the two. That is the seat the harness keeps for plugin configuration — so the card sits beside the Bash and Agent Loop cards, in their geometry, and the settings rail carries no second gear for it.
 
 ## Status
 
@@ -159,7 +162,7 @@ dsh plugin --profile web add "$(pwd)"
 
 Either way, restart dsh web afterwards
 (`pkill -f 'dsh web'; setsid dsh web > /tmp/dsh-web-out.log 2> /tmp/dsh-web-err.log < /dev/null &; disown`),
-then open **Settings → Jira** and fill in your credentials.
+then open **Settings → 插件 → 插件配置 → Jira** and fill in your credentials.
 
 ### Uninstall
 
@@ -170,8 +173,8 @@ dsh plugin --profile web remove @ian/sc-jira
 ## Configure
 
 Credentials live in the `scjira` settings namespace (server / login / API token / display name /
-proxy) and are entered in **Settings → Jira**. The token is stored with `role('secret')` and is
-never echoed back by the API.
+proxy / scope mode) and are entered in **Settings → 插件 → 插件配置 → Jira**. The token is stored
+with `role('secret')` and is never echoed back by the API.
 
 ## Tests
 
@@ -180,6 +183,7 @@ pnpm run typecheck          # static — tsc on host + client
 pnpm run lint               # static — oxlint
 pnpm run test               # unit  — vitest (64 tests across 5 files)
 node scripts/probe.mjs      # browser — Playwright smoke test
+node scripts/probe-settings.mjs   # browser — the configuration card
 ```
 
 ## Routes
@@ -246,12 +250,15 @@ sc-jira-dsh/
 │   ├── storage.ts                     # meta.json + Schemastery schema (role('secret'))
 │   ├── types.ts                       # shared types
 │   └── client/
-│       ├── index.ts                   # client apply: locale + settings.section + conversation.view
-│       ├── ScjiraSettingsCard.tsx     # credentials form
+│       ├── index.ts                   # client apply: locale + settings.plugin.item + conversation.view
+│       ├── ScjiraSettingsCard.tsx     # the plugin configuration card
+│       ├── JiraLogo.tsx               # the Jira mark
+│       ├── draft.ts                   # the card's form model (pure)
+│       ├── styles.ts                  # the card's stylesheet (namespaced classes)
 │       ├── ScjiraView.tsx             # conversation view: 3 sub-tab panels
 │       ├── locales.ts                 # zh + en dictionaries
 │       └── globals.d.ts               # ambient slots/locale types
-├── tests/                             # 64 vitest tests
+├── tests/                             # vitest suites
 ├── scripts/
 │   ├── probe.mjs                      # Playwright smoke
 │   ├── probe-themes.mjs               # theme token probe

@@ -1,7 +1,8 @@
 /**
  * sc-jira CLIENT apply. Registers:
  *   - locale dictionary (zh-CN + en-US) — namespace 'scjira'
- *   - Settings section card (slot 'settings.section', id 'scjira') for credentials
+ *   - Configuration card (slot 'settings.plugin.item', key 'scjira') that
+ *     appears under 插件 → 插件配置, beside the harness's own plugin cards
  *   - Conversation view (slot 'conversation.view', id 'sc-jira') that appears as
  *     a tab next to Trajectory, with 3 sub-tabs: 我的未完成 / Worklog 周报 / 绑定 Session
  *
@@ -89,16 +90,21 @@ export function apply(ctx: Context): void {
     }
   }
 
-  // 2. Settings section card (credentials + live data)
-  ctx.slots.inject('settings.section', () =>
+  // 2. The configuration card, in the Plugins section's configurable tab.
+  //
+  // DSH keeps a plugin's own configuration under 插件 → 插件配置, and
+  // `settings.plugin.item` is the seat it reserves for plugins that live
+  // outside the harness repository: the key is the settings namespace the
+  // Host registered, and the tab pairs the two without learning what the
+  // namespace means. sc-jira registers the `scjira` namespace, so keying the
+  // card by it puts the card in that list — beside the Bash and Agent Loop
+  // cards, in their geometry, with the Jira mark instead of a gear.
+  ctx.slots.inject('settings.plugin.item', () =>
     ctx.slots.register(
       {
-        name: 'settings.section',
-        id: 'scjira',
-        order: 100,
+        name: 'settings.plugin.item',
+        key: 'scjira',
         locale: NS,
-        label: () => ctx.locale.bind(NS)('settings.nav'),
-        inject: () => ({ t: ctx.locale.bind(NS) }),
       },
       ScjiraSettingsCard as never,
     ),

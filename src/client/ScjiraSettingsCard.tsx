@@ -1,157 +1,276 @@
+/**
+ * The Jira configuration card.
+ *
+ * It lives in the Plugins section's configurable tab — `settings.plugin.item`,
+ * keyed by the `scjira` settings namespace the Host registers — so it sits
+ * beside the Bash and Agent Loop cards and inherits their geometry: the same
+ * disclosure card, the same field rhythm, the same footer. Nothing here is
+ * styled by hand-picked colours: every rule resolves through a `--dsw-alias-*`
+ * token, so the card follows the theme instead of fighting it.
+ *
+ * The values live in the Host's `scjira` settings namespace. This card reads
+ * them back through the plugin's own status route and writes them through its
+ * config route, which keeps the secret handling (a blank token never clears
+ * the stored one) in one place — the Host.
+ */
 import * as React from 'react'
+import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { JiraLogo } from './JiraLogo.js'
+import { EMPTY, isDirty, toDraft, type Draft, type StatusResponse } from './draft.js'
+import { ensureStyles } from './styles.js'
 
-interface PropsRuntime {
+/** The locale face the card renders its copy through. */
+export interface ScjiraSettingsCardProps {
   t: (key: string) => string
 }
 
-export type ScjiraSettingsCardProps = PropsRuntime
-
-interface DescriptorValue {
-  server: string
-  login: string
-  displayName: string
-  token: string  // redacted — never echoed by status endpoint
-  proxy: string
+/** One labelled field with its hint and an optional state badge. */
+function Field(props: {
+  id: string
+  label: string
+  hint: string
+  badge?: React.ReactNode
+  children: React.ReactNode
+}): React.ReactElement {
+  return (
+    <div className="scjira-field">
+      <div className="scjira-head">
+        <label className="scjira-label" htmlFor={props.id}>{props.label}</label>
+        {props.badge}
+      </div>
+      {props.children}
+      <p className="scjira-hint">{props.hint}</p>
+    </div>
+  )
 }
 
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: 6,
-  background: 'var(--dsw-alias-bg-overlay)',
-  color: 'var(--dsw-alias-label-primary)',
-  border: '1px solid var(--dsw-alias-border-l2)',
-  borderRadius: 4,
-}
-
+/**
+ * Render the Jira configuration card.
+ *
+ * The card opens empty and loads the current configuration on mount; the
+ * Host's answer is the baseline the dirty check compares against, so a
+ * reload never looks like an unsaved edit.
+ * @param props - the locale face.
+ * @returns the card element.
+ */
 export function ScjiraSettingsCard({ t }: ScjiraSettingsCardProps): React.ReactElement {
-  const [data, setData] = React.useState<DescriptorValue | null>(null)
-  const [server, setServer] = React.useState('')
-  const [login, setLogin] = React.useState('')
-  const [token, setToken] = React.useState('')
-  const [displayName, setDisplayName] = React.useState('')
-  const [proxy, setProxy] = React.useState('')
-  const [saved, setSaved] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-  const busyRef = React.useRef(false)
-  const [, setBusy] = React.useState(false)
+  ensureStyles()
 
-  // Load current config from host via our own /api/scjira/status endpoint.
-  // Token is never echoed (the host redact secrets).
+  const [open, setOpen] = React.useState(false)
+  const [baseline, setBaseline] = React.useState<Draft | null>(null)
+  const [draft, setDraft] = React.useState<Draft>(EMPTY)
+  const [configured, setConfigured] = React.useState(false)
+  const [saving, setSaving] = React.useState(false)
+  const [notice, setNotice] = React.useState<{ tone: 'ok' | 'failed'; text: string } | null>(null)
+
+  // The current configuration, read once per mount. The token is never part
+  // of the answer — the Host redacts it — so the field starts blank.
   React.useEffect(() => {
     let aborted = false
     fetch('/api/scjira/status', { credentials: 'include' })
-      .then(r => r.json() as Promise<{
-        ok: boolean; configured: boolean;
-        server?: string; login?: string; displayName?: string; proxy?: string;
-      }>)
+      .then(r => r.json() as Promise<StatusResponse>)
       .then(body => {
-        if (aborted || !body.ok) return
-        const value: DescriptorValue = {
-          server: body.server ?? '',
-          login: body.login ?? '',
-          displayName: body.displayName ?? '',
-          token: '',
-          proxy: body.proxy ?? '',
-        }
-        setData(value)
-        setServer(value.server)
-        setLogin(value.login)
-        setDisplayName(value.displayName)
-        setProxy(value.proxy)
+        if (aborted || body.ok === false) return
+        const value = toDraft(body)
+        setBaseline(value)
+        setDraft(value)
+        setConfigured(body.configured === true)
       })
       .catch(() => {
-        // Network error: leave fields empty so user can type fresh values.
+        // A failed read leaves the fields empty: the user can still type a
+        // full configuration and save it.
       })
     return () => { aborted = true }
   }, [])
 
-  async function save() {
-    if (busyRef.current) return
-    busyRef.current = true
-    setBusy(true)
-    setError(null)
-    setSaved(false)
+  const dirty = isDirty(draft, baseline)
+
+  function edit<K extends keyof Draft>(key: K, value: Draft[K]): void {
+    setDraft(previous => ({ ...previous, [key]: value }))
+    setNotice(null)
+  }
+
+  function discard(): void {
+    if (baseline === null) return
+    setDraft({ ...baseline, token: '' })
+    setNotice(null)
+  }
+
+  async function save(): Promise<void> {
+    if (saving || !dirty) return
+    setSaving(true)
+    setNotice(null)
     try {
-      const r = await fetch('/api/scjira/config', {
+      const response = await fetch('/api/scjira/config', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ server, login, displayName, token, proxy }),
+        body: JSON.stringify({
+          server: draft.server,
+          login: draft.login,
+          displayName: draft.displayName,
+          proxy: draft.proxy,
+          scopeMode: draft.scopeMode,
+          token: draft.token,
+        }),
       })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      setSaved(true)
-      setToken('')
-      // Refresh after save
-      const body = await r.clone().json().catch(() => null)
-      if (body && body.ok) {
-        setServer(body.server ?? server)
-        setLogin(body.login ?? login)
-        setDisplayName(body.displayName ?? displayName)
-        setProxy(body.proxy ?? proxy)
+      const body = await response.json().catch(() => ({}) as StatusResponse)
+      if (!response.ok || body.ok === false) {
+        throw new Error((body as { error?: string }).error ?? `HTTP ${response.status}`)
       }
+      const value = toDraft(body)
+      setBaseline(value)
+      setDraft({ ...value, token: '' })
+      setNotice({ tone: 'ok', text: t('settings.saved') })
     } catch (err) {
-      setError(String(err))
+      setNotice({ tone: 'failed', text: `${t('settings.saveFailed')}: ${(err as Error).message}` })
     } finally {
-      busyRef.current = false
-      setBusy(false)
+      setSaving(false)
     }
   }
 
   return (
-    <div style={{ padding: 16, color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-base)' }}>
-      <h3>{t('settings.title')}</h3>
-      <div style={{ display: 'grid', gap: 8, maxWidth: 480 }}>
-        <label>
-          <div>{t('settings.server')}</div>
-          <input value={server} onChange={e => setServer(e.target.value)} style={inputStyle} />
-        </label>
-        <label>
-          <div>{t('settings.login')}</div>
-          <input value={login} onChange={e => setLogin(e.target.value)} style={inputStyle} />
-        </label>
-        <label>
-          <div>{t('settings.displayName')}</div>
-          <input value={displayName} onChange={e => setDisplayName(e.target.value)} style={inputStyle} />
-        </label>
-        <label>
-          <div>{t('settings.token')}</div>
-          <input
-            type="password"
-            value={token}
-            onChange={e => setToken(e.target.value)}
-            placeholder={data && data.login ? '(unchanged)' : t('settings.token')}
-            style={inputStyle}
-          />
-        </label>
-        <label>
-          <div>{t('settings.proxy')}</div>
-          <input
-            value={proxy}
-            onChange={e => setProxy(e.target.value)}
-            placeholder="(optional, e.g. http://127.0.0.1:8888)"
-            style={inputStyle}
-          />
-        </label>
-        <div>
-          <button
-            onClick={save}
-            disabled={busyRef.current}
-            style={{
-              padding: '6px 16px',
-              background: '#2684ff',
-              color: 'var(--dsw-alias-label-primary)',
-              border: 'none',
-              borderRadius: 4,
-              cursor: 'pointer',
-              fontWeight: 600,
-            }}
+    <li className={open ? 'scjira-card scjira-cardOpen' : 'scjira-card'}>
+      <button
+        type="button"
+        className="scjira-header"
+        aria-expanded={open}
+        onClick={() => { setOpen(!open) }}
+      >
+        <span className="scjira-mark"><JiraLogo size={20} /></span>
+        <span className="scjira-headText">
+          <span className="scjira-name">{t('settings.card.name')}</span>
+          <span className="scjira-description">{t('settings.card.description')}</span>
+        </span>
+        <IconChevronDownOutline14
+          className={open ? 'scjira-chevron scjira-chevronOpen' : 'scjira-chevron'}
+          size={14}
+        />
+      </button>
+      {open ? (
+        <div className="scjira-body">
+          <Field
+            id="scjira-server"
+            label={t('settings.server')}
+            hint={t('settings.serverHint')}
           >
-            {t('settings.save')}
-          </button>
-          {saved && <span style={{ marginLeft: 8, color: '#36b37e' }}>✓</span>}
-          {error && <span style={{ marginLeft: 8, color: '#de350b' }}>{error}</span>}
+            <input
+              id="scjira-server"
+              className="scjira-input"
+              type="text"
+              value={draft.server}
+              onChange={e => { edit('server', e.target.value) }}
+            />
+          </Field>
+
+          <Field
+            id="scjira-login"
+            label={t('settings.login')}
+            hint={t('settings.loginHint')}
+          >
+            <input
+              id="scjira-login"
+              className="scjira-input"
+              type="text"
+              value={draft.login}
+              onChange={e => { edit('login', e.target.value) }}
+            />
+          </Field>
+
+          <Field
+            id="scjira-display-name"
+            label={t('settings.displayName')}
+            hint={t('settings.displayNameHint')}
+          >
+            <input
+              id="scjira-display-name"
+              className="scjira-input"
+              type="text"
+              value={draft.displayName}
+              onChange={e => { edit('displayName', e.target.value) }}
+            />
+          </Field>
+
+          <Field
+            id="scjira-token"
+            label={t('settings.token')}
+            hint={t('settings.tokenHint')}
+            badge={(
+              <span className={configured ? 'scjira-badge' : 'scjira-badgeMuted'}>
+                {configured ? t('settings.tokenConfigured') : t('settings.tokenMissing')}
+              </span>
+            )}
+          >
+            <input
+              id="scjira-token"
+              className="scjira-input"
+              type="password"
+              autoComplete="off"
+              value={draft.token}
+              placeholder={t('settings.tokenUnchanged')}
+              onChange={e => { edit('token', e.target.value) }}
+            />
+          </Field>
+
+          <Field
+            id="scjira-proxy"
+            label={t('settings.proxy')}
+            hint={t('settings.proxyHint')}
+          >
+            <input
+              id="scjira-proxy"
+              className="scjira-input"
+              type="text"
+              value={draft.proxy}
+              placeholder={t('settings.proxyUnset')}
+              onChange={e => { edit('proxy', e.target.value) }}
+            />
+          </Field>
+
+          <Field
+            id="scjira-scope-mode"
+            label={t('settings.scopeMode')}
+            hint={t('settings.scopeModeHint')}
+          >
+            <select
+              id="scjira-scope-mode"
+              className="scjira-input scjira-select"
+              value={draft.scopeMode}
+              onChange={e => { edit('scopeMode', e.target.value === 'narrow' ? 'narrow' : 'advisory') }}
+            >
+              <option value="advisory">{t('settings.scopeModeAdvisory')}</option>
+              <option value="narrow">{t('settings.scopeModeNarrow')}</option>
+            </select>
+          </Field>
+
+          <div className="scjira-footer">
+            {notice !== null ? (
+              <p
+                className={notice.tone === 'ok' ? 'scjira-status scjira-statusOk' : 'scjira-status scjira-statusFailed'}
+                role="status"
+              >
+                {notice.text}
+              </p>
+            ) : <p className="scjira-status" />}
+            <button
+              type="button"
+              className="scjira-discard"
+              disabled={!dirty || saving}
+              onClick={discard}
+            >
+              {t('settings.discard')}
+            </button>
+            <button
+              type="button"
+              className="scjira-save"
+              disabled={!dirty || saving}
+              onClick={() => { void save() }}
+            >
+              {saving ? t('settings.saving') : t('settings.save')}
+            </button>
+          </div>
         </div>
-      </div>
-    </div>
+      ) : null}
+    </li>
   )
 }
