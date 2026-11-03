@@ -80,6 +80,48 @@ function getRuntime(): ScjiraRuntime {
   return { fetchJson: defaultFetchJson }
 }
 
+/**
+ * The Jira Server's address, read once per page.
+ *
+ * The Host owns the configuration, so a row normally carries its own address
+ * and this is never consulted. It is the fallback for a Host that predates
+ * that field: the client half is re-read from disk on every page load, while
+ * the Host half only changes when the server restarts — so a link that
+ * depended on a new Host field would sit dead (an anchor without an href)
+ * until the restart, which is exactly how a link looks "not clickable".
+ */
+let serverAddress: string | null | undefined
+let serverAddressPending: Promise<string | null> | null = null
+
+async function jiraServerAddress(fetchJson: ScjiraRuntime['fetchJson']): Promise<string | null> {
+  if (serverAddress !== undefined) return serverAddress
+  if (serverAddressPending === null) {
+    serverAddressPending = fetchJson<{ ok?: boolean; server?: string }>('/api/scjira/status')
+      .then(body => {
+        serverAddress = body.server ?? null
+        return serverAddress
+      })
+      .catch(() => {
+        serverAddress = null
+        return null
+      })
+  }
+  return serverAddressPending
+}
+
+/**
+ * The browsable address of an issue, built from the server address.
+ *
+ * The `/browse/<key>` form is Jira Server's own issue permalink; the
+ * trailing slashes are trimmed so a configured `https://host/` and
+ * `https://host` produce the same link.
+ */
+function browseUrl(server: string | null | undefined, key: string | undefined): string | undefined {
+  if (server === undefined || server === null || server === '') return undefined
+  if (key === undefined || key === '') return undefined
+  return `${server.replace(/\/+$/, '')}/browse/${key}`
+}
+
 // Color tokens — white text on dark background (Atlassian dark-theme palette).
 // User requested: keep background unchanged, use white text. The DSH card
 // background is dark (in this user's theme); we therefore render FG in pure
@@ -259,6 +301,7 @@ function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson
   const [weekOffset, setWeekOffset] = React.useState(0)
   const [data, setData] = React.useState<WorklogWeekResponse | null>(null)
   const [loading, setLoading] = React.useState(true)
+  const [server, setServer] = React.useState<string | null>(null)
 
   // Compute the Monday of (this week + weekOffset * 7 days).
   // FIX bug-3: week boundaries are resolved in the plugin timezone
@@ -293,6 +336,15 @@ function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson
     })
     return () => { aborted = true }
   }, [fetchJson, weekStart])
+
+  // The fallback address, for a Host that does not send one with the rows.
+  React.useEffect(() => {
+    let aborted = false
+    void jiraServerAddress(fetchJson).then(address => {
+      if (!aborted) setServer(address)
+    })
+    return () => { aborted = true }
+  }, [fetchJson])
 
   // First fetch only: full-page "加载中…". After that we keep the previous
   // data visible and surface the in-flight state via the small "更新中…" chip
@@ -479,9 +531,11 @@ function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson
                   {/* The issue key opens the issue on the Jira Server. The
                       address comes from the Host, which owns the server
                       configuration — a same-page anchor would just move the
-                      DSH page's hash instead. */}
+                      DSH page's hash instead. A Host that predates the
+                      address falls back to the one the client reads from
+                      the status route, so the link is never inert. */}
                   <a
-                    href={e.url}
+                    href={e.url ?? browseUrl(server, e.issueKey)}
                     target="_blank"
                     rel="noreferrer"
                     style={{ color: ACCENT_BAR, textDecoration: 'none' }}
@@ -506,6 +560,7 @@ function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraVi
   const [input, setInput] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [msg, setMsg] = React.useState<string | null>(null)
+  const [server, setServer] = React.useState<string | null>(null)
 
   const reload = React.useCallback(async () => {
     setLoading(true)
@@ -518,6 +573,15 @@ function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraVi
   }, [fetchJson, sessionId])
 
   React.useEffect(() => { void reload() }, [reload])
+
+  // The fallback address, for a Host that does not send one with the binding.
+  React.useEffect(() => {
+    let aborted = false
+    void jiraServerAddress(fetchJson).then(address => {
+      if (!aborted) setServer(address)
+    })
+    return () => { aborted = true }
+  }, [fetchJson])
 
   async function bind() {
     if (!input.trim()) return
@@ -543,6 +607,11 @@ function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraVi
 
   if (loading) return <div style={{ padding: 12, color: FG_MUTED }}>加载中…</div>
 
+  // The bound issue's address: the Host's, or the fallback for a Host that
+  // predates the field. Without either, the key stays plain text — a link
+  // with no address is a link that does nothing when clicked.
+  const boundHref = data?.url ?? browseUrl(server, data?.key)
+
   return (
     <div>
       <div style={{
@@ -555,9 +624,9 @@ function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraVi
           ? (
             <span>
               当前 session 绑定到{' '}
-              {data.url !== undefined ? (
+              {boundHref !== undefined ? (
                 <a
-                  href={data.url}
+                  href={boundHref}
                   target="_blank"
                   rel="noreferrer"
                   style={{ color: ACCENT, fontWeight: 600, textDecoration: 'none' }}
