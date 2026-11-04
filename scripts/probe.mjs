@@ -13,6 +13,9 @@ import { writeFile, mkdir } from 'node:fs/promises'
 import { launchOptions } from './chrome.mjs'
 
 const BASE    = process.env.DSH_BASE ?? 'http://127.0.0.1:3080'
+// The page URL carries the access token as a query parameter; the API does
+// not take it, so the two addresses are kept apart.
+const API     = BASE.replace(/\?.*$/, '').replace(/\/+$/, '')
 const OUT_DIR = process.env.OUT_DIR  ?? '/tmp/sc-jira-test'
 
 await mkdir(OUT_DIR, { recursive: true })
@@ -26,22 +29,34 @@ page.on('console',   m => { if (m.type() === 'error') consoleErrors.push(m.text(
 page.on('pageerror', e => consoleErrors.push(`pageerror: ${e.stack ?? e.message}`))
 
 // Step 1: host alive
-const statusResp = await page.request.get(`${BASE}/api/scjira/status`)
+const statusResp = await page.request.get(`${API}/api/scjira/status`)
 const statusBody = await statusResp.json().catch(() => ({}))
 const statusOk = statusResp.ok() && statusBody.ok === true
 
 // Step 2: open + enter session
 await page.goto(BASE, { waitUntil: 'networkidle', timeout: 30000 })
 await page.waitForTimeout(1500)
-// The first two name the sessions this machine happened to create; the last
-// is the generic fallback, so the probe also works on a fresh profile.
-for (const sel of ['text=创建JIRA插件', 'text=DSH工具执行Shell命令实现', '[class*="sessionRow"]', 'text=新会话']) {
-  const l = page.locator(sel).first()
-  if (await l.count() && await l.isVisible()) {
-    await l.click({ timeout: 3000 }).catch(() => {})
-    await page.waitForTimeout(2000)
-    break
+
+// The 0.2 preview notice opens as a modal over everything; dismiss it first.
+for (const label of ['继续', '知道了', '我知道了', '确定']) {
+  const btn = page.getByRole('button', { name: label, exact: true }).first()
+  if (await btn.count() > 0 && await btn.isVisible().catch(() => false)) {
+    await btn.click({ timeout: 5000 }).catch(() => {})
+    await page.waitForTimeout(800)
   }
+}
+
+// The sidebar is a tree, and a session row carries a `session:` row key — the
+// one hook that does not depend on the UI's language. The view ring only
+// renders for a session that has content, so the rows are walked until the
+// ring shows up.
+const sessionRows = page.locator('[data-row-key^="session:"]')
+const sessionCount = await sessionRows.count()
+let sessionOpened = false
+for (let i = 0; i < sessionCount; i++) {
+  await sessionRows.nth(i).click({ timeout: 3000 }).catch(() => {})
+  await page.waitForTimeout(2000)
+  if (await page.locator('[role="tab"]').count() > 0) { sessionOpened = true; break }
 }
 
 // Step 3: click "Jira" view tab (was "Jira 集成")
