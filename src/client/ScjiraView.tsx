@@ -1,33 +1,22 @@
 /**
  * ScjiraView — the conversation.view entry surfaced next to Trajectory.
- * Renders three sub-tabs:
- *   - 我的未完成: GET /api/scjira/list-my-open
+ * Renders two read-only sub-tabs:
  *   - Worklog 周报: GET /api/scjira/list-worklog-week
- *   - 绑定 Session: GET /api/scjira/get-binding (uses current sessionId)
+ *   - Issue 详情:  GET /api/scjira/issue?key=…
  *
- * Component receives framework-standard props (sessionId, useSession) plus
- * `t` from the locale inject face. Renders nothing while a request is in
- * flight; surfaces a hint when credentials are missing.
+ * Nothing here writes, binds, or records: both tabs render what Jira already
+ * knows. `t` arrives from the locale inject face; the panel surfaces a hint
+ * when credentials are missing or the read fails.
  */
 import * as React from 'react'
-import type { IssueSummary, DayTotal } from '../types.js'
+import type { DayTotal } from '../types.js'
 import { addDays, mondayOf, todayIso } from '../timezone.js'
-import { WorklogLedgerPanel } from './WorklogLedgerPanel.js'
 
 interface ScjiraViewProps {
-  sessionId: string
   t: (key: string, params?: Record<string, string | number>) => string
 }
 
-type SubTab = 'open' | 'worklog' | 'bind'
-
-interface ListOpenResponse {
-  ok: boolean
-  issues?: IssueSummary[]
-  totalSpentSeconds?: number
-  jql?: string
-  error?: string
-}
+type SubTab = 'worklog' | 'issue'
 
 interface WorklogWeekResponse {
   ok: boolean
@@ -40,14 +29,33 @@ interface WorklogWeekResponse {
   error?: string
 }
 
-interface GetBindingResponse {
+/** One comment, as the Host returns it. */
+interface IssueComment {
+  id: string
+  author: string
+  created: string
+  updated: string
+  body: string
+}
+
+/** One issue with its comments, as the Host returns it. */
+interface IssueDetail {
+  key: string
+  summary: string
+  description: string
+  statusName: string
+  priority: string
+  assignee: string
+  duedate: string
+  url: string
+  comments: IssueComment[]
+  commentError?: string
+}
+
+interface IssueResponse {
   ok: boolean
-  bound: boolean
-  key?: string
-  summary?: string
-  sessionId?: string
-  /** The bound issue's browsable address on the configured Jira Server. */
-  url?: string
+  issue?: IssueDetail
+  error?: string
 }
 
 interface ScjiraRuntime {
@@ -83,12 +91,9 @@ function getRuntime(): ScjiraRuntime {
 /**
  * The Jira Server's address, read once per page.
  *
- * The Host owns the configuration, so a row normally carries its own address
- * and this is never consulted. It is the fallback for a Host that predates
- * that field: the client half is re-read from disk on every page load, while
- * the Host half only changes when the server restarts — so a link that
- * depended on a new Host field would sit dead (an anchor without an href)
- * until the restart, which is exactly how a link looks "not clickable".
+ * The Host owns the configuration, so the week rows carry their own address
+ * and this is only the fallback; the issue tab builds its links from the
+ * issue rows the Host returns.
  */
 let serverAddress: string | null | undefined
 let serverAddressPending: Promise<string | null> | null = null
@@ -122,11 +127,6 @@ function browseUrl(server: string | null | undefined, key: string | undefined): 
   return `${server.replace(/\/+$/, '')}/browse/${key}`
 }
 
-// Color tokens — white text on dark background (Atlassian dark-theme palette).
-// User requested: keep background unchanged, use white text. The DSH card
-// background is dark (in this user's theme); we therefore render FG in pure
-// white and shift accents/borders to dark-theme variants so they remain
-// readable on top of it.
 // Color tokens — use DSH's own theme-aware CSS custom properties so the
 // panel automatically matches whichever theme the user has selected (light,
 // dark, or "follow system"). DSH declares these on <body>; because CSS
@@ -138,7 +138,6 @@ function browseUrl(server: string | null | undefined, key: string | undefined): 
 //   --dsw-alias-label-primary    : #0f1115 (light) / near-white in dark
 //   --dsw-alias-label-secondary  : #61666b (light) / muted in dark
 //   --dsw-alias-label-tertiary   : #81858c (light) / faint in dark
-//   --dsw-alias-label-caption    : #adb2b8 (light) / faint in dark
 //   --dsw-alias-border-l1..l4    : rgba(0,0,0,X) — works on both via overlay
 //   --dsw-alias-button-ghost-active-fill : #ebeef2 (light) / tinted in dark
 // ACCENT stays hardcoded (DSH has no theme-aware link color); mid-blue
@@ -153,8 +152,6 @@ const INPUT_BG       = 'var(--dsw-alias-bg-overlay)'
 const ACCENT         = '#2684ff'
 const ACCENT_BAR     = '#2684ff'
 const ACCENT_STRONG  = '#4c9aff'
-const SUCCESS        = '#36b37e'
-const ERROR          = '#de350b'
 
 const cardStyle: React.CSSProperties = {
   padding: '12px 16px',
@@ -215,86 +212,12 @@ function fmtSeconds(s: number): string {
   return `${m}m`
 }
 
-function LoadingRow({ colSpan }: { colSpan: number }): React.ReactElement {
-  return (
-    <tr>
-      <td colSpan={colSpan} style={{ ...tdStyle, color: FG_MUTED }}>
-        加载中…
-      </td>
-    </tr>
-  )
-}
-
-function ErrorRow({ colSpan, message }: { colSpan: number; message: string }): React.ReactElement {
-  return (
-    <tr>
-      <td colSpan={colSpan} style={{ ...tdStyle, color: ERROR }}>
-        {message}
-      </td>
-    </tr>
-  )
-}
-
-function ListMyOpenPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: ScjiraRuntime['fetchJson'] }): React.ReactElement {
-  const [data, setData] = React.useState<ListOpenResponse | null>(null)
-  const [loading, setLoading] = React.useState(true)
-
-  const reload = React.useCallback(async () => {
-    setLoading(true)
-    try {
-      const r = await fetchJson<ListOpenResponse>('/api/scjira/list-my-open')
-      setData(r)
-    } finally {
-      setLoading(false)
-    }
-  }, [fetchJson])
-
-  React.useEffect(() => { void reload() }, [reload])
-
-  if (loading) return <LoadingRow colSpan={6} />
-  if (!data?.ok) {
-    return (
-      <div style={{ padding: 12, color: FG_MUTED }}>
-        {data?.error ?? t('error.network')}
-      </div>
-    )
-  }
-  const issues = data.issues ?? []
-  if (issues.length === 0) {
-    return <div style={{ padding: 12, color: FG_MUTED }}>{t('status.empty')}</div>
-  }
-  return (
-    <table style={tableStyle}>
-      <thead>
-        <tr>
-          <th style={thStyle}>Key</th>
-          <th style={thStyle}>Summary</th>
-          <th style={thStyle}>Status</th>
-          <th style={thStyle}>Priority</th>
-          <th style={thStyle}>Due</th>
-          <th style={thStyle}>Spent</th>
-        </tr>
-      </thead>
-      <tbody>
-        {issues.map((iss) => (
-          <tr key={iss.key}>
-            <td style={tdStyle}>
-              <a href={iss.url} target="_blank" rel="noreferrer" style={{ color: ACCENT, fontWeight: 500 }}>
-                {iss.key}
-              </a>
-            </td>
-            <td style={tdStyle}>{iss.summary}</td>
-            <td style={tdStyle}>{iss.statusName}</td>
-            <td style={tdStyle}>{iss.priority}</td>
-            <td style={tdStyle}>
-              {iss.duedate ? iss.duedate : <span style={{ color: FG_FAINT }}>—</span>}
-            </td>
-            <td style={tdStyle}>{fmtSeconds(iss.timeSpentSeconds)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  )
+/** `2026-11-04T03:10:11.000+0800` → `11-04 11:10`, keeping the wall clock. */
+function fmtInstant(iso: string): string {
+  if (!iso) return ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso)
+  if (m === null) return iso
+  return `${m[2]}-${m[3]} ${m[4]}:${m[5]}`
 }
 
 function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: ScjiraRuntime['fetchJson'] }): React.ReactElement {
@@ -548,103 +471,56 @@ function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson
               </tr>
             )),
           )}
+          {labels.every(l => (totals[l.date]?.entries ?? []).length === 0) && (
+            <tr>
+              <td colSpan={4} style={{ ...tdStyle, color: FG_MUTED }}>{t('status.empty')}</td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
   )
 }
 
-function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraViewProps['t']; fetchJson: ScjiraRuntime['fetchJson'] }): React.ReactElement {
-  const [data, setData] = React.useState<GetBindingResponse | null>(null)
-  const [loading, setLoading] = React.useState(true)
+/**
+ * One issue, read on demand.
+ *
+ * The key is typed rather than derived from the session: this tab no longer
+ * knows (or stores) which issue the conversation is about, so the reader says
+ * which one to open. The read is the same `handleIssue` the `jira_issue` tool
+ * uses, so the panel and the agent see the same thing.
+ */
+function IssuePanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: ScjiraRuntime['fetchJson'] }): React.ReactElement {
   const [input, setInput] = React.useState('')
-  const [busy, setBusy] = React.useState(false)
-  const [msg, setMsg] = React.useState<string | null>(null)
-  const [server, setServer] = React.useState<string | null>(null)
+  const [data, setData] = React.useState<IssueResponse | null>(null)
+  const [loading, setLoading] = React.useState(false)
 
-  const reload = React.useCallback(async () => {
+  async function lookup(key: string): Promise<void> {
+    const trimmed = key.trim()
+    if (trimmed === '') return
     setLoading(true)
     try {
-      const r = await fetchJson<GetBindingResponse>(`/api/scjira/get-binding?sessionId=${encodeURIComponent(sessionId)}`)
+      const r = await fetchJson<IssueResponse>(`/api/scjira/issue?key=${encodeURIComponent(trimmed)}`)
       setData(r)
+    } catch {
+      setData({ ok: false, error: t('error.network') })
     } finally {
       setLoading(false)
     }
-  }, [fetchJson, sessionId])
-
-  React.useEffect(() => { void reload() }, [reload])
-
-  // The fallback address, for a Host that does not send one with the binding.
-  React.useEffect(() => {
-    let aborted = false
-    void jiraServerAddress(fetchJson).then(address => {
-      if (!aborted) setServer(address)
-    })
-    return () => { aborted = true }
-  }, [fetchJson])
-
-  async function bind() {
-    if (!input.trim()) return
-    setBusy(true)
-    setMsg(null)
-    try {
-      const r = await fetchJson<{ ok: boolean; error?: string; key?: string }>('/api/scjira/bind', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId, taskKey: input.trim() }),
-      })
-      if (r.ok) {
-        setMsg(`${t('bind.success')} → ${r.key ?? input}`)
-        setInput('')
-        await reload()
-      } else {
-        setMsg(r.error ?? 'failed')
-      }
-    } finally {
-      setBusy(false)
-    }
   }
 
-  if (loading) return <div style={{ padding: 12, color: FG_MUTED }}>加载中…</div>
-
-  // The bound issue's address: the Host's, or the fallback for a Host that
-  // predates the field. Without either, the key stays plain text — a link
-  // with no address is a link that does nothing when clicked.
-  const boundHref = data?.url ?? browseUrl(server, data?.key)
+  const issue = data?.ok === true ? data.issue : undefined
 
   return (
     <div>
-      <div style={{
-        marginBottom: 12,
-        padding: '8px 10px',
-        background: INPUT_BG,
-        borderRadius: 4,
-      }}>
-        {data?.bound
-          ? (
-            <span>
-              当前 session 绑定到{' '}
-              {boundHref !== undefined ? (
-                <a
-                  href={boundHref}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: ACCENT, fontWeight: 600, textDecoration: 'none' }}
-                >
-                  {data.key}
-                </a>
-              ) : <strong>{data.key}</strong>}
-              {' · '}{data.summary}
-            </span>
-          )
-          : <span style={{ color: FG_MUTED }}>当前 session 未绑定</span>}
-      </div>
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         <input
           value={input}
           onChange={e => setInput(e.target.value)}
-          placeholder={t('bind.placeholder')}
-          disabled={busy}
+          onKeyDown={e => { if (e.key === 'Enter') void lookup(input) }}
+          placeholder={t('issue.placeholder')}
+          disabled={loading}
+          aria-label={t('issue.key')}
           style={{
             flex: 1,
             padding: 6,
@@ -652,76 +528,138 @@ function BindPanel({ sessionId, t, fetchJson }: { sessionId: string; t: ScjiraVi
             color: FG,
             border: `1px solid ${BORDER}`,
             borderRadius: 4,
+            font: 'inherit',
           }}
         />
         <button
-          onClick={bind}
-          disabled={busy || !input.trim()}
+          type="button"
+          onClick={() => { void lookup(input) }}
+          disabled={loading || input.trim() === ''}
           style={{
             padding: '6px 16px',
             background: ACCENT,
             color: 'var(--dsw-alias-label-primary)',
             border: 'none',
             borderRadius: 4,
-            cursor: busy ? 'default' : 'pointer',
+            cursor: loading ? 'default' : 'pointer',
+            font: 'inherit',
             fontWeight: 600,
           }}
         >
-          {t('bind.btn')}
+          {loading ? t('status.loading') : t('issue.lookup')}
         </button>
       </div>
-      {msg && <div style={{ marginTop: 8, color: SUCCESS }}>{msg}</div>}
 
-      {/* The local worklog ledger. It fills as the session works, and
-          nothing reaches Jira until the user selects entries and uploads
-          them — the upload is the review's outcome, not the recorder's
-          decision. */}
-      <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${BORDER_SOFT}` }}>
-        <div style={{ marginBottom: 10, color: FG, fontWeight: 600, fontSize: 13 }}>
-          {t('worklog.title')}
+      {data === null && (
+        <div style={{ padding: 12, color: FG_MUTED }}>{t('issue.empty')}</div>
+      )}
+      {data !== null && data.ok !== true && (
+        <div style={{ padding: 12, color: FG_MUTED }}>{data.error ?? t('error.network')}</div>
+      )}
+
+      {issue !== undefined && (
+        <div>
+          <div style={{ marginBottom: 8 }}>
+            <a
+              href={issue.url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: ACCENT, fontWeight: 600, textDecoration: 'none', fontSize: 14 }}
+            >
+              {issue.key}
+            </a>
+            <span style={{ marginLeft: 8, color: FG, fontWeight: 500 }}>{issue.summary}</span>
+          </div>
+          <div style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 16,
+            marginBottom: 16,
+            padding: '8px 10px',
+            background: INPUT_BG,
+            borderRadius: 4,
+            fontSize: 12,
+            color: FG_MUTED,
+          }}>
+            <span>{t('issue.status')}: <strong style={{ color: FG }}>{issue.statusName || '—'}</strong></span>
+            <span>{t('issue.priority')}: <strong style={{ color: FG }}>{issue.priority || '—'}</strong></span>
+            <span>{t('issue.assignee')}: <strong style={{ color: FG }}>{issue.assignee || '—'}</strong></span>
+            <span>{t('issue.duedate')}: <strong style={{ color: FG }}>{issue.duedate || '—'}</strong></span>
+          </div>
+
+          <div style={{ marginBottom: 6, color: FG_MUTED, fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            {t('issue.description')}
+          </div>
+          <div style={{
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            marginBottom: 20,
+            padding: '8px 10px',
+            background: INPUT_BG,
+            borderRadius: 4,
+            fontSize: 13,
+            lineHeight: '20px',
+          }}>
+            {issue.description.trim() === '' ? t('issue.noDescription') : issue.description}
+          </div>
+
+          <div style={{ marginBottom: 6, color: FG_MUTED, fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            {t('issue.comments', { count: issue.comments.length })}
+          </div>
+          {issue.commentError !== undefined && (
+            <div style={{ marginBottom: 8, color: FG_FAINT, fontSize: 12 }}>
+              {t('issue.commentFailed', { error: issue.commentError })}
+            </div>
+          )}
+          {issue.comments.length === 0
+            ? <div style={{ color: FG_MUTED, fontSize: 13 }}>{t('issue.noComments')}</div>
+            : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {issue.comments.map(c => (
+                  <div key={c.id} style={{
+                    padding: '8px 10px',
+                    border: `1px solid ${BORDER_SOFT}`,
+                    borderRadius: 4,
+                    fontSize: 13,
+                  }}>
+                    <div style={{ color: FG_MUTED, fontSize: 12, marginBottom: 4 }}>
+                      {c.author || '—'} · {fmtInstant(c.created)}
+                    </div>
+                    <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{c.body}</div>
+                  </div>
+                ))}
+              </div>
+            )}
         </div>
-        <WorklogLedgerPanel
-          issueKey={data?.bound === true ? (data.key ?? '') : ''}
-          fetchJson={fetchJson}
-          t={t}
-        />
-      </div>
+      )}
     </div>
   )
 }
 
-export function ScjiraView({ sessionId, t }: ScjiraViewProps): React.ReactElement {
-  const [tab, setTab] = React.useState<SubTab>('open')
+export function ScjiraView({ t }: ScjiraViewProps): React.ReactElement {
+  const [tab, setTab] = React.useState<SubTab>('worklog')
   const rt = React.useMemo(getRuntime, [])
 
   return (
     <div style={cardStyle}>
       <div style={tabBarStyle}>
-        <button type="button" style={tabBtn(tab === 'open')} onClick={() => setTab('open')}>
-          {t('view.open')}
-        </button>
         <button type="button" style={tabBtn(tab === 'worklog')} onClick={() => setTab('worklog')}>
           {t('view.worklog')}
         </button>
-        <button type="button" style={tabBtn(tab === 'bind')} onClick={() => setTab('bind')}>
-          {t('view.bind')}
+        <button type="button" style={tabBtn(tab === 'issue')} onClick={() => setTab('issue')}>
+          {t('view.issue')}
         </button>
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-        {/* All three panels stay mounted across tab switches (display:none
-            for inactive). Without this, every tab switch unmounts + remounts
-            the panel, which re-fires the useEffect and shows "加载中…" until
-            Jira responds. Each panel still only runs its fetch once per
-            startDate/weekOffset change, but the user sees no loading on
-            switch because the previously-fetched data is already in state. */}
-        <div style={{ display: tab === 'open' ? 'block' : 'none' }}>
-          <ListMyOpenPanel t={t} fetchJson={rt.fetchJson} />
-        </div>
+        {/* Both panels stay mounted across tab switches (display:none for the
+            inactive one). Without this, every tab switch unmounts + remounts
+            the panel, which re-fires the week fetch and shows "加载中…" until
+            Jira responds — and would throw away a typed issue key. */}
         <div style={{ display: tab === 'worklog' ? 'block' : 'none' }}>
           <WorklogWeekPanel t={t} fetchJson={rt.fetchJson} />
         </div>
-        <div style={{ display: tab === 'bind' ? 'block' : 'none' }}>
-          <BindPanel sessionId={sessionId} t={t} fetchJson={rt.fetchJson} />
+        <div style={{ display: tab === 'issue' ? 'block' : 'none' }}>
+          <IssuePanel t={t} fetchJson={rt.fetchJson} />
         </div>
       </div>
     </div>

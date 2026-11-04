@@ -1,14 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { makeConfig } from './fakes.js'
 
-// Provide minimal fakes for the 3 inject deps (settings, webServer, tools)
-// plus the optional commands service the host reads through ctx.get.
+// Provide minimal fakes for the 3 inject deps (settings, webServer, tools).
 // Also fake ctx.effect so we can verify disposers are returned.
 
 function makeContext() {
   const routes: any[] = []
   const tools = new Map<string, any>()
-  const commands = new Map<string, any>()
   const settingsMutations: Array<{ ns: string; ops: any[] }> = []
   const disposers: Array<() => void> = []
 
@@ -35,13 +33,6 @@ function makeContext() {
     },
   }
 
-  const commandsService = {
-    register: (definition: any) => {
-      commands.set(definition.name, definition)
-      return () => { commands.delete(definition.name) }
-    },
-  }
-
   const ctx: any = {
     settings,
     webServer,
@@ -55,12 +46,12 @@ function makeContext() {
       return d
     },
     on: () => () => {},
-    register: (key: string, svc: any) => { (ctx as any)[key] = svc },
-    // The commands service is optional: the plugin reads it through ctx.get.
-    get: (name: string) => (name === 'commands' ? commandsService : undefined),
+    // The plugin no longer subscribes to any host event and reads no optional
+    // service: a read-only plugin has nothing to hook.
+    get: () => undefined,
   }
 
-  return { ctx, routes, tools, commands, settingsMutations, disposers }
+  return { ctx, routes, tools, settingsMutations, disposers }
 }
 
 /** A request that delivers its body when the route handler asks for it. */
@@ -101,61 +92,54 @@ function makeResponse() {
 }
 
 describe('host plugin dispose', () => {
-  it('registers 2 route prefixes + 12 tools on apply', async () => {
+  it('registers 1 route prefix + 3 tools on apply', async () => {
     const { ctx, routes, tools, disposers } = makeContext()
     const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
-    // Two prefixes: the main /api/scjira routes and the worklog ledger's.
-    expect(routes.length).toBe(2)
-    expect(tools.size).toBe(12)
-    // 12 tool registrations + 3 command registrations + 2 webServer registrations
-    expect(disposers.length).toBeGreaterThanOrEqual(17)
+    apply(ctx, makeConfig())
+    // One prefix carries every read route; the plugin has no second surface.
+    expect(routes.length).toBe(1)
+    expect(tools.size).toBe(3)
+    // 3 tool registrations + 1 webServer registration
+    expect(disposers.length).toBe(4)
   })
 
-  it('all 12 expected tool names are registered', async () => {
+  it('all 3 expected tool names are registered', async () => {
     const { ctx, tools } = makeContext()
     const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
+    apply(ctx, makeConfig())
     expect(tools.has('jira_list_my_open')).toBe(true)
     expect(tools.has('jira_list_worklog_week')).toBe(true)
-    expect(tools.has('jira_get_binding')).toBe(true)
-    expect(tools.has('jira_bind')).toBe(true)
-    expect(tools.has('jira_summarize')).toBe(true)
     expect(tools.has('jira_issue')).toBe(true)
-    expect(tools.has('jira_log_worklog')).toBe(true)
-    expect(tools.has('jira_worklogs')).toBe(true)
-    expect(tools.has('jira_upload_worklogs')).toBe(true)
-    expect(tools.has('jira_comment')).toBe(true)
-    expect(tools.has('jira_current')).toBe(true)
-    expect(tools.has('jira_unbind')).toBe(true)
   })
 
-  it('registers the three human commands', async () => {
-    const { ctx, commands } = makeContext()
+  it('registers no hook and no command', async () => {
+    const { ctx } = makeContext()
+    const subscriptions: string[] = []
+    ctx.on = (name: string) => { subscriptions.push(name); return () => {} }
     const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
-    expect(commands.has('jira-bind')).toBe(true)
-    expect(commands.has('jira-unbind')).toBe(true)
-    expect(commands.has('jira-worklog')).toBe(true)
-  })
-
-  it('runs without a commands service', async () => {
-    // The commands service is optional: a host without it still runs the
-    // plugin, it simply offers no slash commands.
-    const { ctx, routes, tools } = makeContext()
-    ctx.get = () => undefined
-    const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
-    expect(routes.length).toBe(2)
-    expect(tools.size).toBe(12)
+    apply(ctx, makeConfig())
+    expect(subscriptions).toEqual([])
   })
 
   it('route prefix is /api/scjira', async () => {
     const { ctx, routes } = makeContext()
     const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
+    apply(ctx, makeConfig())
     expect(routes[0].path).toBe('/api/scjira')
     expect(routes[0].kind).toBe('prefix')
+  })
+
+  it('a read route refuses to run without a token instead of calling Jira', async () => {
+    const { ctx, routes } = makeContext()
+    const { apply } = await import('../src/index.js')
+    // makeConfig's default has no token: the route must answer 503.
+    apply(ctx, makeConfig())
+    const { req, flush } = makeRequest('GET', '/api/scjira/issue?key=DZ300-1')
+    const res = makeResponse()
+    await routes[0].handler(req, res)
+    await flush()
+    expect(res.statusCode).toBe(503)
+    expect(JSON.parse(res.payload).ok).toBe(false)
   })
 })
 
@@ -163,12 +147,11 @@ describe('settings namespace', () => {
   it('writes a settings change to the profile entry it runs under', async () => {
     const { ctx, routes, settingsMutations } = makeContext()
     const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
+    apply(ctx, makeConfig())
 
     const { req, flush } = makeRequest('POST', '/api/scjira/config', JSON.stringify({
       server: 'https://jira.example.com',
       login: 'A003688',
-      scopeMode: 'narrow',
     }))
     const res = makeResponse()
     await routes[0].handler(req, res)
@@ -180,7 +163,6 @@ describe('settings namespace', () => {
     expect(settingsMutations[0].ops).toEqual([
       { op: 'set', path: ['server'], value: 'https://jira.example.com' },
       { op: 'set', path: ['login'], value: 'A003688' },
-      { op: 'set', path: ['scopeMode'], value: 'narrow' },
     ])
     expect(res.statusCode).toBe(200)
   })
@@ -188,7 +170,7 @@ describe('settings namespace', () => {
   it('leaves the token alone when the change carries none', async () => {
     const { ctx, routes, settingsMutations } = makeContext()
     const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
+    apply(ctx, makeConfig())
 
     const { req, flush } = makeRequest('POST', '/api/scjira/config', JSON.stringify({
       displayName: 'Ian Yin',
@@ -203,7 +185,7 @@ describe('settings namespace', () => {
     const { ctx, routes, settingsMutations } = makeContext()
     ctx.fiber = { entry: undefined }
     const { apply } = await import('../src/index.js')
-    apply(ctx, makeConfig('/tmp/scjira-dispose-test'))
+    apply(ctx, makeConfig())
 
     const { req, flush } = makeRequest('POST', '/api/scjira/config', JSON.stringify({ login: 'x' }))
     const res = makeResponse()

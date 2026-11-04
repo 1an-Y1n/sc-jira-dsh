@@ -1,20 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import {
   handleListMyOpen,
   handleListWorklogWeek,
-  handleGetBinding,
-  handleBind,
   handleIssue,
-  handleAddComment,
-  handleUnbind,
   searchAllIssues,
   issueBrowseUrl,
   SEARCH_PAGE_SIZE,
 } from '../src/handlers.js'
-import { writeMetaWithBinding } from '../src/storage.js'
 import type { ScjiraSettings } from '../src/types.js'
 
 const creds: ScjiraSettings = {
@@ -22,6 +14,7 @@ const creds: ScjiraSettings = {
   login: 'A003688',
   token: 'fake',
   displayName: 'Ian Yin',
+  proxy: '',
 }
 
 function makeFakeJiraClient(impl: Partial<{
@@ -29,14 +22,12 @@ function makeFakeJiraClient(impl: Partial<{
   worklogs: any
   search: any
   comments: any
-  addComment: any
 }> = {}) {
   return {
     issue: impl.issue ?? (async () => ({ ok: false, error: 'http' })),
     worklogs: impl.worklogs ?? (async () => ({ ok: false, error: 'http' })),
     search: impl.search ?? (async () => ({ ok: false, error: 'http' })),
     comments: impl.comments ?? (async () => ({ ok: false, error: 'http' })),
-    addComment: impl.addComment ?? (async () => ({ ok: false, error: 'http' })),
   } as any
 }
 
@@ -195,62 +186,6 @@ describe('handleListWorklogWeek', () => {
     expect(callCount).toBeGreaterThanOrEqual(2)
   })
 })
-
-describe('handleBind', () => {
-  it('writes meta.json when key is new', async () => {
-    const tasksDir = await mkdtemp(join(tmpdir(), 'scjira-bind-'))
-    const jira = makeFakeJiraClient({
-      issue: async () => ({
-        ok: true,
-        body: { key: 'DZ300-99', id: '99', fields: { summary: 'New task', status: { name: 'Open' } } },
-      }),
-    })
-    const r = await handleBind({ jira, creds, tasksDir }, { sessionId: 's1', taskKey: 'DZ300-99' })
-    expect(r.ok).toBe(true)
-    if (r.ok) expect(r.key).toBe('DZ300-99')
-    await rm(tasksDir, { recursive: true, force: true })
-  })
-
-  it('rejects malformed key with English error containing "format"', async () => {
-    // FIX bug #2: handler error must be English so the /format/ regex matches
-    const jira = makeFakeJiraClient()
-    const r = await handleBind({ jira, creds, tasksDir: '/tmp/x' }, { sessionId: 's', taskKey: 'not-a-key' })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.error).toMatch(/format/)
-  })
-
-  it('rejects when Jira does not know the key', async () => {
-    const jira = makeFakeJiraClient({ issue: async () => ({ ok: false, error: 'http', detail: '404' }) })
-    const r = await handleBind({ jira, creds, tasksDir: '/tmp/x' }, { sessionId: 's', taskKey: 'DZ300-404' })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.error).toMatch(/Jira rejected/)
-  })
-})
-
-describe('handleGetBinding', () => {
-  it('returns bound=false when nothing stored', async () => {
-    const tasksDir = await mkdtemp(join(tmpdir(), 'scjira-get-'))
-    const r = await handleGetBinding({ tasksDir }, { sessionId: 'nope' })
-    expect(r.bound).toBe(false)
-    await rm(tasksDir, { recursive: true, force: true })
-  })
-
-  it('returns bound=true when matching sessionId found', async () => {
-    const tasksDir = await mkdtemp(join(tmpdir(), 'scjira-get-'))
-    await mkdir(join(tasksDir, 'DZ300-1'), { recursive: true })
-    await writeFile(join(tasksDir, 'DZ300-1/meta.json'), JSON.stringify({
-      schemaVersion: 3, key: 'DZ300-1', status: 'active', startedAt: 'x', endedAt: null,
-      dshSessionId: 's-found', issueSummary: { summary: 'Bound', statusName: 'Open', priority: '', duedate: '', url: '' },
-      logCount: 0, logBytes: 0, summaryCount: 0,
-    }))
-    const r = await handleGetBinding({ tasksDir }, { sessionId: 's-found' })
-    expect(r.bound).toBe(true)
-    if (r.bound) expect(r.key).toBe('DZ300-1')
-    await rm(tasksDir, { recursive: true, force: true })
-  })
-})
-
-// --- searchAllIssues (pagination) ------------------------------------------
 
 describe('searchAllIssues', () => {
   it('stops after a single page when the total fits', async () => {
@@ -430,78 +365,5 @@ describe('handleIssue', () => {
       expect(r.issue.summary).toBe('S')
       expect(r.issue.comments).toEqual([])
     }
-  })
-})
-
-describe('handleAddComment', () => {
-  it('adds a comment', async () => {
-    const jira = makeFakeJiraClient({
-      addComment: async () => ({ ok: true, body: { id: '10', author: { displayName: 'Ian Yin' }, created: 'c', updated: 'u', body: 'done' } }),
-    })
-    const r = await handleAddComment({ jira }, { key: 'DZ300-797', body: 'done' })
-    expect(r.ok).toBe(true)
-    if (r.ok) expect(r.comment.id).toBe('10')
-  })
-
-  it('rejects an empty body before calling Jira', async () => {
-    const r = await handleAddComment({ jira: makeFakeJiraClient() }, { key: 'DZ300-797', body: '  ' })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.error).toBe('comment body is empty')
-  })
-
-  it('reports a Jira rejection', async () => {
-    const jira = makeFakeJiraClient({ addComment: async () => ({ ok: false, error: 'http', detail: 'status 400' }) })
-    const r = await handleAddComment({ jira }, { key: 'DZ300-797', body: 'done' })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.error).toContain('status 400')
-  })
-})
-
-describe('handleUnbind', () => {
-  it('ends the binding and keeps the files', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'scjira-unbind-'))
-    try {
-      await writeMetaWithBinding(dir, {
-        key: 'DZ300-797',
-        sessionId: 'agent-abc',
-        issueSummary: { summary: 'S', statusName: 'Open' },
-      })
-      const r = await handleUnbind({ tasksDir: dir }, { sessionId: 'agent-abc' })
-      expect(r.ok).toBe(true)
-      if (r.ok) expect(r.key).toBe('DZ300-797')
-      const after = await handleGetBinding({ tasksDir: dir }, { sessionId: 'agent-abc' })
-      expect(after.bound).toBe(false)
-      // The task directory survives — the history belongs to the work.
-      const { readdir } = await import('node:fs/promises')
-      const entries = await readdir(dir)
-      expect(entries).toContain('DZ300-797')
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('reports that nothing was bound', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'scjira-unbind-'))
-    try {
-      const r = await handleUnbind({ tasksDir: dir }, { sessionId: 'agent-none' })
-      expect(r.ok).toBe(false)
-      if (!r.ok) expect(r.error).toContain('not bound')
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-})
-
-describe('issueBrowseUrl', () => {
-  it('builds the Jira Server issue permalink', () => {
-    expect(issueBrowseUrl('https://jira.example.com', 'DZ300-1'))
-      .toBe('https://jira.example.com/browse/DZ300-1')
-  })
-
-  it('trims trailing slashes, so a configured host with one still links', () => {
-    expect(issueBrowseUrl('https://jira.example.com/', 'DZ300-1'))
-      .toBe('https://jira.example.com/browse/DZ300-1')
-    expect(issueBrowseUrl('https://jira.example.com///', 'DZ300-1'))
-      .toBe('https://jira.example.com/browse/DZ300-1')
   })
 })

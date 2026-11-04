@@ -258,141 +258,11 @@ describe('formatDuration', () => {
   })
 })
 
-// --- worklog writes --------------------------------------------------------
+// --- comments -------------------------------------------------------------
 
-describe('JiraClient worklog writes', () => {
+describe('JiraClient comments', () => {
   beforeEach(() => {
     mockSpawn.mockReset()
-  })
-
-  /** Pull the JSON body curl was told to send. */
-  function sentBody(callIndex = 0): any {
-    const args = (mockSpawn.mock.calls[callIndex]?.[1] as string[] | undefined) ?? []
-    const idx = args.indexOf('--data-binary')
-    expect(idx).toBeGreaterThan(-1)
-    return JSON.parse(args[idx + 1] ?? '{}')
-  }
-
-  function sentMethod(callIndex = 0): string {
-    const args = (mockSpawn.mock.calls[callIndex]?.[1] as string[] | undefined) ?? []
-    const idx = args.indexOf('-X')
-    return args[idx + 1] ?? ''
-  }
-
-  it('addWorklog() POSTs to the worklog endpoint with a Jira duration string', async () => {
-    const created = { id: '102839', started: '2026-10-26T09:00:00.000+0800', timeSpent: '1h 30m', timeSpentSeconds: 5400 }
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: JSON.stringify(created) }) })
-
-    const r = await client.addWorklog('DZ300-797', {
-      seconds: 5400,
-      comment: 'auto: turn 3',
-      started: '2026-10-26T09:00:00.000+0800',
-    })
-    expect(r.ok).toBe(true)
-    if (r.ok) expect(r.body.id).toBe('102839')
-
-    expect(sentMethod()).toBe('POST')
-    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
-    expect(args[args.length - 1]).toBe(
-      `https://jiratest.example.com/rest/api/${API_VERSION}/issue/DZ300-797/worklog`,
-    )
-    // The field Jira accepts is timeSpent, NOT timeSpentSeconds.
-    const body = sentBody()
-    expect(body.timeSpent).toBe('1h 30m')
-    expect(body.timeSpentSeconds).toBeUndefined()
-    expect(body.comment).toBe('auto: turn 3')
-    expect(body.started).toBe('2026-10-26T09:00:00.000+0800')
-  })
-
-  it('addWorklog() omits an empty comment', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: '{"id":"1"}' }) })
-    await client.addWorklog('DZ300-797', { seconds: 60, comment: '' })
-    expect(sentBody().comment).toBeUndefined()
-  })
-
-  it('addWorklog() rejects an invalid key before spawning', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: '{}' }) })
-    const r = await client.addWorklog('not-a-key', { seconds: 60 })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.error).toBe('http')
-    expect(mockSpawn).not.toHaveBeenCalled()
-  })
-
-  it('updateWorklog() PUTs the changed duration and start time', async () => {
-    const updated = { id: '102839', started: '2026-10-26T14:30:00.000+0800', timeSpent: '1h 30m', timeSpentSeconds: 5400 }
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: JSON.stringify(updated) }) })
-
-    const r = await client.updateWorklog('DZ300-797', '102839', {
-      seconds: 5400,
-      started: '2026-10-26T14:30:00.000+0800',
-    })
-    expect(r.ok).toBe(true)
-
-    expect(sentMethod()).toBe('PUT')
-    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
-    expect(args[args.length - 1]).toBe(
-      `https://jiratest.example.com/rest/api/${API_VERSION}/issue/DZ300-797/worklog/102839`,
-    )
-    const body = sentBody()
-    expect(body.timeSpent).toBe('1h 30m')
-    expect(body.started).toBe('2026-10-26T14:30:00.000+0800')
-  })
-
-  it('updateWorklog() sends only the fields that changed', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{"id":"1"}' }) })
-    await client.updateWorklog('DZ300-797', '102839', { seconds: 1800 })
-    const body = sentBody()
-    expect(body.timeSpent).toBe('30m')
-    expect(body.started).toBeUndefined()
-    expect(body.comment).toBeUndefined()
-  })
-
-  it('updateWorklog() rejects a non-numeric worklog id', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
-    const r = await client.updateWorklog('DZ300-797', 'abc', { seconds: 60 })
-    expect(r.ok).toBe(false)
-    expect(mockSpawn).not.toHaveBeenCalled()
-  })
-
-  it('updateWorklog() refuses an empty update', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
-    const r = await client.updateWorklog('DZ300-797', '102839', {})
-    expect(r.ok).toBe(false)
-    expect(mockSpawn).not.toHaveBeenCalled()
-  })
-
-  it('deleteWorklog() DELETEs and accepts an empty 204 body', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 204, body: '' }) })
-    const r = await client.deleteWorklog('DZ300-797', '102839')
-    expect(r.ok).toBe(true)
-    expect(sentMethod()).toBe('DELETE')
-    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
-    expect(args[args.length - 1]).toBe(
-      `https://jiratest.example.com/rest/api/${API_VERSION}/issue/DZ300-797/worklog/102839`,
-    )
-  })
-
-  it('deleteWorklog() rejects an invalid key', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 204, body: '' }) })
-    const r = await client.deleteWorklog('nope', '102839')
-    expect(r.ok).toBe(false)
-    expect(mockSpawn).not.toHaveBeenCalled()
-  })
-
-  it('addWorklog() surfaces an auth failure', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 401, body: 'Unauthorized' }) })
-    const r = await client.addWorklog('DZ300-797', { seconds: 60 })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.error).toBe('auth')
-  })
-
-  it('addWorklog() sends a Content-Type header with the body', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: '{"id":"1"}' }) })
-    await client.addWorklog('DZ300-797', { seconds: 60 })
-    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
-    const idx = args.indexOf('Content-Type: application/json')
-    expect(idx).toBeGreaterThan(-1)
-    expect(args[idx - 1]).toBe('-H')
   })
 
   it('comments() returns the page on 200 JSON', async () => {
@@ -421,32 +291,6 @@ describe('JiraClient worklog writes', () => {
     const r = await client.comments('nope')
     expect(r.ok).toBe(false)
     expect(mockSpawn).not.toHaveBeenCalled()
-  })
-
-  it('addComment() POSTs the comment body', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: '{"id":"10","body":"done"}' }) })
-    const r = await client.addComment('DZ300-797', 'done')
-    expect(r.ok).toBe(true)
-    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
-    expect(args).toContain('POST')
-    const url = args[args.length - 1] ?? ''
-    expect(url).toContain(`/rest/api/${API_VERSION}/issue/DZ300-797/comment`)
-    const payload = args[args.indexOf('--data-binary') + 1] ?? ''
-    expect(JSON.parse(payload)).toEqual({ body: 'done' })
-  })
-
-  it('addComment() rejects an empty body without calling Jira', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 201, body: '{}' }) })
-    const r = await client.addComment('DZ300-797', '   ')
-    expect(r.ok).toBe(false)
-    expect(mockSpawn).not.toHaveBeenCalled()
-  })
-
-  it('addComment() surfaces an auth failure', async () => {
-    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 401, body: 'Unauthorized' }) })
-    const r = await client.addComment('DZ300-797', 'done')
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.error).toBe('auth')
   })
 })
 

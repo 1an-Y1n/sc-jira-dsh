@@ -1,7 +1,9 @@
 /**
- * sc-jira 4 pure handlers. Each takes its dependencies (JiraClient + storage
- * root + creds) as arguments so tests can inject fakes without mocking the
- * module system.
+ * sc-jira read handlers. Each takes its dependencies (JiraClient + creds) as
+ * arguments so tests can inject fakes without mocking the module system.
+ *
+ * Three reads only: what is open for me, what I worked on in one week, and
+ * one issue with its comments. Nothing here writes to Jira.
  *
  * Spec §6 bug fixes applied:
  *  - §6.1 author-filter on every worklog entry (not JQL)
@@ -11,7 +13,6 @@
  */
 import type { IssueSummary, WorklogEntry, DayTotal, ScjiraSettings, JiraResult } from './types.js'
 import { KEY_RE } from './types.js'
-import { writeMetaWithBinding, readBindingBySession, endBinding, type BindingResult } from './storage.js'
 import { addDays, mondayOf, todayIso } from './timezone.js'
 
 // --- helpers ---------------------------------------------------------------
@@ -252,66 +253,6 @@ export async function handleListWorklogWeek(
   }
 }
 
-// --- bind ------------------------------------------------------------------
-
-export interface BindDeps {
-  jira: { issue: (key: string) => Promise<JiraResult<any>> }
-  creds: ScjiraSettings
-  tasksDir: string
-}
-
-export type BindResult =
-  | { ok: true; key: string; sessionId: string; summary: string }
-  | { ok: false; error: string }
-
-export async function handleBind(
-  deps: BindDeps,
-  args: { sessionId: string; taskKey: string },
-): Promise<BindResult> {
-  // §6.4 fix: KEY_RE.test everywhere
-  // FIX bug #2: error message is English so /format/ regex matches in tests
-  if (!KEY_RE.test(args.taskKey)) {
-    return { ok: false, error: `Invalid taskKey format (expected PROJECT-123): got "${args.taskKey}"` }
-  }
-  const env = await deps.jira.issue(args.taskKey)
-  if (!env.ok) {
-    return { ok: false, error: `Jira rejected ${args.taskKey} (${env.error})` }
-  }
-  const summary = env.body.fields?.summary ?? ''
-  const statusName = env.body.fields?.status?.name ?? ''
-  const assignee = env.body.fields?.assignee?.displayName ?? ''
-  await writeMetaWithBinding(deps.tasksDir, {
-    key: args.taskKey,
-    sessionId: args.sessionId,
-    issueSummary: {
-      key: args.taskKey,
-      summary,
-      statusName,
-      priority: env.body.fields?.priority?.name ?? '',
-      duedate: env.body.fields?.duedate ?? '',
-      url: `${deps.creds.server}/browse/${args.taskKey}`,
-      // The assignee is part of the binding's facts: the scope context names
-      // it, and `jira_current` reports it. Absent when Jira has no assignee
-      // — the field is then simply not there.
-      ...(assignee === '' ? {} : { assignee }),
-    },
-  })
-  return { ok: true, key: args.taskKey, sessionId: args.sessionId, summary }
-}
-
-// --- getBinding -----------------------------------------------------------
-
-export interface GetBindingDeps {
-  tasksDir: string
-}
-
-export async function handleGetBinding(
-  deps: GetBindingDeps,
-  args: { sessionId: string },
-): Promise<BindingResult> {
-  return readBindingBySession(deps.tasksDir, args.sessionId)
-}
-
 // --- issue detail ----------------------------------------------------------
 //
 // The agent working on a ticket needs the ticket itself: its description and
@@ -383,75 +324,4 @@ export async function handleIssue(deps: IssueDeps, args: { key: string }): Promi
     ok: true,
     issue: { ...summary, comments, ...(commentError !== undefined ? { commentError } : {}) },
   }
-}
-
-// --- comment ---------------------------------------------------------------
-
-export interface AddCommentDeps {
-  jira: { addComment: (key: string, body: string) => Promise<JiraResult<any>> }
-}
-
-export type AddCommentResult =
-  | { ok: true; comment: IssueComment }
-  | { ok: false; error: string }
-
-/**
- * Add a comment to an issue.
- *
- * This is a write to the tracker, so it happens only when a caller asked for
- * it — never as a side effect of reading something.
- */
-export async function handleAddComment(
-  deps: AddCommentDeps,
-  args: { key: string; body: string },
-): Promise<AddCommentResult> {
-  if (!KEY_RE.test(args.key)) {
-    return { ok: false, error: `Invalid issue key format (expected PROJECT-123): got "${args.key}"` }
-  }
-  if (args.body.trim() === '') {
-    return { ok: false, error: 'comment body is empty' }
-  }
-  const created = await deps.jira.addComment(args.key, args.body)
-  if (!created.ok) {
-    return { ok: false, error: `Jira rejected the comment (${created.error}${created.detail !== undefined ? `: ${created.detail}` : ''})` }
-  }
-  const c = created.body ?? {}
-  return {
-    ok: true,
-    comment: {
-      id: c.id ?? '',
-      author: c.author?.displayName ?? c.author?.name ?? '',
-      created: c.created ?? '',
-      updated: c.updated ?? '',
-      body: typeof c.body === 'string' ? c.body : args.body,
-    },
-  }
-}
-
-// --- unbind ----------------------------------------------------------------
-
-export interface UnbindDeps {
-  tasksDir: string
-}
-
-export type UnbindResult =
-  | { ok: true; key: string; summary: string }
-  | { ok: false; error: string }
-
-/**
- * End a session's binding, keeping the files it produced.
- *
- * The worklog ledger and the session log stay on disk — the history belongs
- * to the work, not to the binding. Only the link between this session and
- * this issue goes away.
- */
-export async function handleUnbind(
-  deps: UnbindDeps,
-  args: { sessionId: string },
-): Promise<UnbindResult> {
-  const ended = await endBinding(deps.tasksDir, args.sessionId)
-  if (ended === null) {
-    return { ok: false, error: 'this session is not bound to any Jira issue' }
-  }
-  return { ok: true, key: ended.key, summary: ended.summary }
 }

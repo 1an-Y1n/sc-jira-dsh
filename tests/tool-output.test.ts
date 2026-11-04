@@ -1,10 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
-import { writeMetaWithBinding } from '../src/storage.js'
 import { lossless } from '../src/lossless.js'
+import { defineJiraTool } from '../src/tool.js'
 import { makeConfig } from './fakes.js'
 
 /**
@@ -33,26 +30,6 @@ function undefinedPaths(value: unknown, path = '$'): string[] {
   return []
 }
 
-/** A Host that records the tools the plugin registers. */
-function makeContext() {
-  const tools = new Map<string, any>()
-  const ctx: any = {
-    settings: { mutate: async () => {}, update: async () => {}, replace: async () => {} },
-    webServer: { register: () => () => {} },
-    tools: { register: (tool: any) => { tools.set(tool.name, tool); return () => {} } },
-    fiber: { entry: { options: { id: 'sc-jira' } } },
-    effect: (fn: () => any) => fn(),
-    on: () => () => {},
-    get: () => undefined,
-  }
-  return { ctx, tools }
-}
-
-async function applyPlugin(ctx: any, tasksDir: string) {
-  const { apply } = await import('../src/index.js')
-  apply(ctx, makeConfig(tasksDir))
-}
-
 describe('lossless', () => {
   it('drops an undefined-valued property', () => {
     const value = lossless({ a: 1, b: undefined, c: 'x' })
@@ -61,13 +38,11 @@ describe('lossless', () => {
   })
 
   it('keeps a null, which JSON does carry', () => {
-    const value = lossless({ a: null })
-    expect(value).toEqual({ a: null })
+    expect(lossless({ a: null })).toEqual({ a: null })
   })
 
   it('drops undefined inside nested objects and arrays', () => {
-    const value = lossless({ rows: [{ id: 'wl-1', jiraId: undefined }] })
-    expect(value).toEqual({ rows: [{ id: 'wl-1' }] })
+    expect(lossless({ rows: [{ id: 'wl-1', jiraId: undefined }] })).toEqual({ rows: [{ id: 'wl-1' }] })
   })
 
   it('turns an undefined array element into null, as JSON would', () => {
@@ -80,103 +55,89 @@ describe('lossless', () => {
   })
 })
 
-describe('the session-identification tools', () => {
-  it('jira_get_binding answers for an unbound session', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'scjira-out-'))
-    try {
-      const { ctx, tools } = makeContext()
-      await applyPlugin(ctx, dir)
-      const tool = tools.get('jira_get_binding')
-      const value = await tool.execute({}, { agent: { id: 'session-unbound' } })
-      expect(value.bound).toBe(false)
-      expect(value.sessionId).toBe('session-unbound')
-      // The key and the summary are absent, not undefined.
-      expect(Object.hasOwn(value, 'key')).toBe(false)
-      expect(undefinedPaths(value)).toEqual([])
-      expect(validateJsonSchemaValue(tool.output.schema, value, 'value')).toEqual([])
-    } finally {
-      await rm(dir, { recursive: true, force: true })
+describe('defineJiraTool', () => {
+  it('strips an undefined field from what the tool returns', async () => {
+    const tool = defineJiraTool({
+      name: 'probe',
+      description: 'probe',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          properties: { key: { type: 'string' }, count: { type: 'number' } },
+          additionalProperties: true,
+        } as any,
+        render: () => [{ type: 'text', text: 'ok' }],
+      },
+      async execute() {
+        // The shape a binding/issue read produces when a field is unknown.
+        return { key: undefined, count: 2 } as any
+      },
+    })
+
+    const value = await tool.execute({}, {} as any)
+    expect(Object.hasOwn(value as object, 'key')).toBe(false)
+    expect(undefinedPaths(value)).toEqual([])
+    expect(validateJsonSchemaValue((tool.output.schema as any), value, 'value')).toEqual([])
+  })
+
+  it('leaves a defined value untouched', async () => {
+    const tool = defineJiraTool({
+      name: 'probe',
+      description: 'probe',
+      parameters: {},
+      output: {
+        schema: { type: 'object', additionalProperties: true } as any,
+        render: () => [{ type: 'text', text: 'ok' }],
+      },
+      async execute() {
+        return { key: 'DZ300-797', comments: [] } as any
+      },
+    })
+    expect(await tool.execute({}, {} as any)).toEqual({ key: 'DZ300-797', comments: [] })
+  })
+})
+
+describe('the registered tools', () => {
+  /** A Host that records the tools the plugin registers. */
+  function makeContext() {
+    const tools = new Map<string, any>()
+    const ctx: any = {
+      settings: { mutate: async () => {}, update: async () => {}, replace: async () => {} },
+      webServer: { register: () => () => {} },
+      tools: { register: (tool: any) => { tools.set(tool.name, tool); return () => {} } },
+      fiber: { entry: { options: { id: 'sc-jira' } } },
+      effect: (fn: () => any) => fn(),
+      on: () => () => {},
+      get: () => undefined,
+    }
+    return { ctx, tools }
+  }
+
+  it('are exactly the three reads, and every one is a read', async () => {
+    const { ctx, tools } = makeContext()
+    const { apply } = await import('../src/index.js')
+    apply(ctx, makeConfig())
+
+    expect([...tools.keys()].sort()).toEqual([
+      'jira_issue',
+      'jira_list_my_open',
+      'jira_list_worklog_week',
+    ])
+    // No write surface: the plugin cannot change anything on the tracker.
+    for (const name of ['jira_comment', 'jira_bind', 'jira_unbind', 'jira_log_worklog',
+      'jira_upload_worklogs', 'jira_current', 'jira_get_binding', 'jira_summarize', 'jira_worklogs']) {
+      expect(tools.has(name)).toBe(false)
     }
   })
 
-  it('jira_current answers for a bound session whose binding has no assignee', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'scjira-out-'))
-    try {
-      // A binding written before the assignee was stored.
-      await writeMetaWithBinding(dir, {
-        key: 'DZ300-797',
-        sessionId: 'session-bound',
-        issueSummary: { summary: 'The issue', statusName: 'Open' } as any,
-      })
-      const { ctx, tools } = makeContext()
-      await applyPlugin(ctx, dir)
-      const tool = tools.get('jira_current')
-      const value = await tool.execute({}, { agent: { id: 'session-bound' } })
-      expect(value.bound).toBe(true)
-      expect(value.key).toBe('DZ300-797')
-      // The assignee is unknown, and unknown is an absent field.
-      expect(Object.hasOwn(value, 'assignee')).toBe(false)
-      expect(undefinedPaths(value)).toEqual([])
-      expect(validateJsonSchemaValue(tool.output.schema, value, 'value')).toEqual([])
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('jira_current reports the assignee when the binding knows it', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'scjira-out-'))
-    try {
-      await writeMetaWithBinding(dir, {
-        key: 'DZ300-797',
-        sessionId: 'session-bound',
-        issueSummary: {
-          key: 'DZ300-797',
-          summary: 'The issue',
-          statusName: 'Open',
-          priority: 'Medium',
-          duedate: '',
-          url: 'https://jiratest.example.com/browse/DZ300-797',
-          assignee: 'Ian Yin',
-        },
-      })
-      const { ctx, tools } = makeContext()
-      await applyPlugin(ctx, dir)
-      const tool = tools.get('jira_current')
-      const value = await tool.execute({}, { agent: { id: 'session-bound' } })
-      expect(value.assignee).toBe('Ian Yin')
-      expect(undefinedPaths(value)).toEqual([])
-      expect(validateJsonSchemaValue(tool.output.schema, value, 'value')).toEqual([])
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('every tool that runs without Jira returns a lossless value', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'scjira-out-'))
-    try {
-      await writeMetaWithBinding(dir, {
-        key: 'DZ300-797',
-        sessionId: 'session-bound',
-        issueSummary: { summary: 'The issue', statusName: 'Open' } as any,
-      })
-      const { ctx, tools } = makeContext()
-      await applyPlugin(ctx, dir)
-      const exec = { agent: { id: 'session-bound' } }
-      const cases: Array<[string, any]> = [
-        ['jira_get_binding', {}],
-        ['jira_current', {}],
-        ['jira_worklogs', {}],
-        ['jira_log_worklog', { seconds: 60, comment: 'test' }],
-        ['jira_summarize', { turn: 1, text: 'did the thing' }],
-      ]
-      for (const [name, args] of cases) {
-        const tool = tools.get(name)
-        const value = await tool.execute(args, exec)
-        expect(undefinedPaths(value), `${name} must not carry undefined`).toEqual([])
-        expect(validateJsonSchemaValue(tool.output.schema, value, 'value'), name).toEqual([])
-      }
-    } finally {
-      await rm(dir, { recursive: true, force: true })
+  it('refuse to call Jira without credentials instead of returning a broken value', async () => {
+    const { ctx, tools } = makeContext()
+    const { apply } = await import('../src/index.js')
+    // makeConfig's default carries no token.
+    apply(ctx, makeConfig())
+    for (const [name, args] of [['jira_list_my_open', {}], ['jira_list_worklog_week', {}], ['jira_issue', { key: 'DZ300-1' }]] as const) {
+      await expect(tools.get(name).execute(args, {} as any)).rejects.toThrow('credentials')
     }
   })
 })

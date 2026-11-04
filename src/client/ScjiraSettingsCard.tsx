@@ -109,7 +109,6 @@ export function ScjiraSettingsCard({ t }: ScjiraSettingsCardProps): React.ReactE
           login: draft.login,
           displayName: draft.displayName,
           proxy: draft.proxy,
-          scopeMode: draft.scopeMode,
           token: draft.token,
         }),
       })
@@ -224,22 +223,6 @@ export function ScjiraSettingsCard({ t }: ScjiraSettingsCardProps): React.ReactE
               placeholder={t('settings.proxyUnset')}
               onChange={e => { edit('proxy', e.target.value) }}
             />
-          </Field>
-
-          <Field
-            id="scjira-scope-mode"
-            label={t('settings.scopeMode')}
-            hint={t('settings.scopeModeHint')}
-          >
-            <select
-              id="scjira-scope-mode"
-              className="scjira-input scjira-select"
-              value={draft.scopeMode}
-              onChange={e => { edit('scopeMode', e.target.value === 'narrow' ? 'narrow' : 'advisory') }}
-            >
-              <option value="advisory">{t('settings.scopeModeAdvisory')}</option>
-              <option value="narrow">{t('settings.scopeModeNarrow')}</option>
-            </select>
           </Field>
 
           <div className="scjira-footer">

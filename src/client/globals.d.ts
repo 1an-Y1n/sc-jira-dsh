@@ -1,7 +1,7 @@
 /**
  * Ambient declarations for the browser client bundle.
  *
- * The DSH client services (locale, slots, sessions) are provided at runtime
+ * The DSH client services (locale, slots) are provided at runtime
  * by the host's frozen platform module table. The npm packages we depend on
  * only ship types for the bare `Context` shape, so we declare the slices we
  * use as augmentations here. Keep these signatures in sync with the running
@@ -79,16 +79,9 @@ interface SlotsRuntime {
   ): () => void
 }
 
-// `sessions` is a framework-standard service for conversation.view owners.
-// We don't need its full shape — just enough to satisfy the inject array.
-interface SessionsRuntime {
-  binding(sessionId: string): unknown
-}
-
 declare module '@deepseek-ai/cordis' {
   interface Context {
     locale: LocaleRuntime
     slots: SlotsRuntime
-    sessions: SessionsRuntime
   }
 }

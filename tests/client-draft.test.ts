@@ -13,7 +13,6 @@ describe('toDraft', () => {
       login: 'someone',
       displayName: 'Some One',
       proxy: 'http://127.0.0.1:8888',
-      scopeMode: 'narrow',
     })
     expect(draft).toEqual({
       server: 'https://jira.example.com',
@@ -21,18 +20,12 @@ describe('toDraft', () => {
       displayName: 'Some One',
       token: '',
       proxy: 'http://127.0.0.1:8888',
-      scopeMode: 'narrow',
     })
   })
 
   it('never carries a token: the Host does not send one back', () => {
     const draft = toDraft({ ok: true, token: 'leaked' } as never)
     expect(draft.token).toBe('')
-  })
-
-  it('falls back to advisory for a missing or unknown scope mode', () => {
-    expect(toDraft({ ok: true }).scopeMode).toBe('advisory')
-    expect(toDraft({ ok: true, scopeMode: 'nonsense' }).scopeMode).toBe('advisory')
   })
 
   it('turns missing text fields into empty strings', () => {
@@ -51,7 +44,6 @@ describe('isDirty', () => {
     login: 'someone',
     displayName: 'Some One',
     proxy: '',
-    scopeMode: 'advisory',
   })
 
   it('is clean before the Host has answered', () => {
@@ -67,10 +59,6 @@ describe('isDirty', () => {
     expect(isDirty({ ...baseline, login: 'other' }, baseline)).toBe(true)
     expect(isDirty({ ...baseline, displayName: 'Other' }, baseline)).toBe(true)
     expect(isDirty({ ...baseline, proxy: 'http://127.0.0.1:8888' }, baseline)).toBe(true)
-  })
-
-  it('is dirty when the scope mode changed', () => {
-    expect(isDirty({ ...baseline, scopeMode: 'narrow' }, baseline)).toBe(true)
   })
 
   it('is dirty when a token was typed, and clean while the token field is blank', () => {

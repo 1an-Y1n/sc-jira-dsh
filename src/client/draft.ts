@@ -6,9 +6,6 @@
  * and when the draft counts as an edit.
  */
 
-/** How strongly a bound session's Jira scope is enforced. */
-export type ScopeMode = 'advisory' | 'narrow'
-
 /** The fields the card edits — the writable part of the `scjira` namespace. */
 export interface Draft {
   server: string
@@ -16,7 +13,6 @@ export interface Draft {
   displayName: string
   token: string
   proxy: string
-  scopeMode: ScopeMode
 }
 
 /** What the Host reports about the current configuration. */
@@ -27,7 +23,6 @@ export interface StatusResponse {
   login?: string
   displayName?: string
   proxy?: string
-  scopeMode?: string
 }
 
 /** The empty draft — the shape every load starts from. */
@@ -37,15 +32,10 @@ export const EMPTY: Draft = {
   displayName: '',
   token: '',
   proxy: '',
-  scopeMode: 'advisory',
 }
 
 /**
  * Read a configuration answer as a draft.
- *
- * A missing scope mode is a host that predates the setting, which behaved as
- * `advisory`; an unknown value falls back the same way rather than reaching
- * the Host as a string it does not know.
  * @param body - the Host's answer.
  * @returns the draft it describes.
  */
@@ -56,7 +46,6 @@ export function toDraft(body: StatusResponse): Draft {
     displayName: body.displayName ?? '',
     token: '',
     proxy: body.proxy ?? '',
-    scopeMode: body.scopeMode === 'narrow' ? 'narrow' : 'advisory',
   }
 }
 
@@ -75,6 +64,5 @@ export function isDirty(draft: Draft, baseline: Draft | null): boolean {
     || draft.login !== baseline.login
     || draft.displayName !== baseline.displayName
     || draft.proxy !== baseline.proxy
-    || draft.scopeMode !== baseline.scopeMode
     || draft.token !== ''
 }
