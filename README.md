@@ -1,168 +1,120 @@
 # @ian/sc-jira
 
-DSH static plugin. Adds Jira integration:
+DSH plugin: a Jira integration for the session you are working in.
 
-- **Configuration card** (`设置 → 插件 → 插件配置 → Jira`): server / login / API token / display name /
-  proxy / 越界策略 — a plugin card beside the harness's own, carrying the Jira mark
-- **Conversation view** (tab next to Trajectory): 3 sub-tabs — 我的未完成 / Worklog 周报 / 绑定 Session
-- **Tools exposed to agent** (12): `jira_list_my_open`, `jira_list_worklog_week(startDate?)`,
-  `jira_get_binding`, `jira_bind`, `jira_summarize`, `jira_issue`, `jira_log_worklog`,
-  `jira_worklogs`, `jira_upload_worklogs`, `jira_comment`, `jira_current`, `jira_unbind`
-- **Commands** (3): `/jira-bind [key]`, `/jira-unbind`, `/jira-worklog` — a command runs against
-  the agent **without** creating a model message, so binding a ticket never enters the conversation
-- **HTTP routes** (all under `/api/scjira/*`): `status`, `config`, `list-my-open`, `open-issues`,
-  `list-worklog-week`, `get-binding`, `bind`, `worklog`, `worklog/edit`, `worklog/upload`,
-  `worklog/repull`
+- **Conversation view** (the tab next to Trajectory), three sub-tabs:
+  **本次 Worklog** / **Worklog 周报** / **Issue 详情**
+- **Configuration card** (`插件 → 已安装插件 → @ian/sc-jira`): server / login / API token /
+  display name / proxy
+- **Tools** (9): 3 reads, and the 6 that run the worklog flow
+- **Commands** (3): `/jira-bind`, `/jira-unbind`, `/jira-worklog` — a command runs against the
+  agent **without** creating a model message
+- **HTTP routes**, all under `/api/scjira/*`: `status`, `config`, `list-worklog-week`, `issue`,
+  `worklog`, `worklog/edit`, `worklog/upload`, `worklog/discard`
 
-The original spec called for 3 right-sidebar sub-tabs, but `@deepseek-ai/dsh-client-ui-sidebar-right` is **not bundled** in the default dsh web profile — `ctx.sidebarRightTabs` never resolves. The plugin therefore mounts a `conversation.view` entry (the tab next to Trajectory) that carries the same 3 sub-tabs, plus a `settings.plugin.item` card for the credentials.
+## What it does
 
-The configuration card lives in the **Plugins** section, not in a settings section of its own. DSH reserves `settings.plugin.item` for plugins that live outside the harness repository: the card is keyed by the settings namespace the Host registers (`scjira`), and the tab pairs the two. That is the seat the harness keeps for plugin configuration — so the card sits beside the Bash and Agent Loop cards, in their geometry, and the settings rail carries no second gear for it.
+A session binds one Jira ticket, works through it with the agent, and finally turns that work into
+a worklog on the tracker:
 
-## Status
+```
+/jira-bind DZ300-797            ← one session, one ticket
+   │
+   ├─ agent records as it goes ← jira_record_activity("定位 panic 到 local_irq_enable", 1800)
+   │                             (seconds may be omitted: the host measures since the last record)
+   │
+   ├─ "生成 worklog"            ← agent calls jira_generate_worklog
+   │                             → a draft: duration + comment + started time, per entry
+   │
+   └─ panel: tick → upload      ← jira_upload_worklog({ ids }) or the 本次 Worklog panel
+```
 
-The current implementation is **v3**: a bound session carries its Jira ticket into the agent's
-context and records the time it spent locally.
+The division of labour is the point:
 
-What that means in practice:
+- **The host measures.** Every turn's span is recorded (`agent/turn-stopping`). It never becomes a
+  worklog entry by itself; it gives an omitted duration its value, and it tells the reader how much
+  measured time the records do not account for (the **gap**).
+- **The agent explains.** Only the agent knows what it was doing, so it writes the activity records
+  and groups them into a draft. It can also record a duration it measured itself, which is kept as
+  given.
+- **The human decides.** Generating and uploading are separate steps. Nothing reaches Jira until a
+  person selects entries and uploads them; a synced entry is final, and a rejected upload stays
+  retryable.
 
-- **Context scoping** — once bound, every step injects the ticket's identity, and a tool call
-  that reaches for a *different* ticket attaches a note (or is refused, in `narrow` mode).
-- **Local-first worklog** — a turn's wall-clock time is appended to `worklog.jsonl` when the
-  turn closes. **Nothing is uploaded automatically.** The entries stay `draft` until a person
-  reviews them in the 绑定 Session panel, ticks the ones that should go to the tracker, and
-  uploads them. The upload is the review's outcome, not the recorder's decision.
-- **Editable time** — a duration, a start time and a note can be changed locally; an entry that
-  is already synced is changed on Jira too, and 「从 Jira 重新拉取」 reconciles the two sides.
-- **Bidirectional 1:1** — a ticket and a session hold each other exclusively; changing one
-  requires `/jira-unbind` first.
+The design this implements is **[docs/design/v4-worklog-redesign.md](docs/design/v4-worklog-redesign.md)**.
+Historical designs are kept in `docs/design/v3-session-binding.md` and `docs/specs/`.
 
-The design this implements is **[docs/design/v3-session-binding.md](docs/design/v3-session-binding.md)**.
+## Data
 
-Historical specs are archived in `docs/specs/` — the v2 runtime was lost on 2026-09-17 and
-that document was its only surviving source of truth.
+One file per session — the plugin's only local state:
 
-## Architecture
+```
+~/.dsh/profiles/web/scjira/sessions/{sessionId}.json
+  binding     key / summary / statusName / url / boundAt
+  activities  what the agent recorded: summary + startedAt + seconds + turn
+  turns       what the host measured: turn span (never billed on its own)
+  draft       entries generated from the activities, each with state
+              draft | synced | failed, its jiraId, and the activityIds it covers
+```
 
-- **Host** (`src/index.ts`): registers the `scjira` settings namespace + 8 HTTP route prefixes + 12 tools + 3 commands, all wrapped in `ctx.effect()` for dispose
-- **Timezone** (`src/timezone.ts`): shared calendar-day/week arithmetic in `Asia/Shanghai`, used by both host and client
-- **Storage** (`src/storage.ts`): schema-versioned `meta.json` (schemaVersion=4) + a derived bidirectional `.index.json`, plus the token persisted with `role('secret')` via `@deepseek-ai/schemastery`
-- **JiraClient** (`src/jira-client.ts`): calls Jira REST via `ctx.subprocess.spawn('curl', ...)` (DSH Node sandbox disables `fetch`)
-- **Handlers** (`src/handlers.ts`): pure functions for the reads and writes (listMyOpen, listWorklogWeek, getBinding, bind, issue, comment, unbind) + a paginating `searchAllIssues` helper
-- **Worklog** (`src/worklog-ledger.ts`, `src/worklog-handlers.ts`): the local ledger and its review/edit/upload/repull operations
-- **Scope** (`src/scope.ts`): which tools name an issue, and what reaching outside the bound one means
-- **Client** (`src/client/`): locale dictionary + Settings card UI + conversation view (3 sub-tab panels) + the `/jira-bind` issue picker
+The directory is `storeDir` in the plugin config. Writes are read-modify-write into a temporary
+file and renamed into place, serialized per session. A file that cannot be parsed is reported and
+**left untouched** — it is the only copy of the records.
+
+`jira_bind` starts a round; `jira_unbind` ends it. Both are refused while the round still has
+records that never reached Jira.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `jira_bind {taskKey}` | Bind this session (one ticket per session) |
+| `jira_unbind` | End the binding, once everything is uploaded |
+| `jira_record_activity {summary, seconds?, startedAt?}` | Record one piece of work |
+| `jira_worklog_state` | Binding, activities, measured vs recorded, gap, draft |
+| `jira_generate_worklog {entries?}` | Turn unbilled activities into a draft |
+| `jira_upload_worklog {ids}` | Upload the selected entries (empty selection = show what is pending) |
+| `jira_list_my_open` | Unresolved issues assigned to me |
+| `jira_list_worklog_week {startDate?}` | One week of my Jira worklogs |
+| `jira_issue {key}` | One issue with its description and comments |
+
+`jira_generate_worklog` without arguments is deterministic: one draft entry per activity, verbatim.
+With `entries` the agent may merge or reword — but every unbilled activity must be covered exactly
+once, and the total is checked against the records: a mismatch is reported as `deltaSeconds`, not
+silently accepted and not refused.
 
 ## Install
 
-> **Want it live without restarting?** Installing through the **plugin market** hot-mounts the
-> plugin into the running host — see [Installing without a restart](#installing-without-a-restart-via-the-plugin-market).
-
-### From GitHub (recommended for other users)
+### From GitHub
 
 ```bash
 dsh plugin --profile web add github:1an-Y1n/sc-jira-dsh
 ```
 
-A git install fetches **sources, not built artifacts** — nothing runs your `build` script
-automatically, so this package ships a `prepare` script that pnpm runs after the install.
-The build is self-contained: it needs only this directory, no sibling monorepo checkout.
-
-pnpm ≥10 refuses to run a git dependency's `prepare` script until it is explicitly allowed,
-so the **first** `add` fails. Copy the key pnpm prints into the profile's
-`pnpm-workspace.yaml` — the key names the exact tarball and commit, so it changes when the
-commit changes:
+A git install fetches **sources, not built artifacts**, and this package ships a `prepare` script
+that pnpm runs after the install. pnpm asks for approval per resolved commit, so the **first**
+`add` fails; copy the key pnpm prints into the profile's `pnpm-workspace.yaml`:
 
 ```yaml
 # ~/.dsh/profiles/web/pnpm-workspace.yaml
-packages:
-  - .
-
-nodeLinker: hoisted
-autoInstallPeers: false
-
 allowBuilds:
-  '@ian/sc-jira@https://codeload.github.com/1an-Y1n/sc-jira-dsh/tar.gz/<commit-sha>': true
+  '@ian/sc-jira@https://codeload.github.com/1an-Y1n/sc-jira-dsh/tar.gz/<commit>': true
 ```
 
-then re-run the `add`. The build then runs automatically and the install completes.
-
-> Allowing a build is **permission to execute the package's code on your machine at install
-> time**, outside any sandbox the agent runs under. Only allow packages whose source you
-> trust. To pin an exact revision, use `github:1an-Y1n/sc-jira-dsh#<sha>` so a later push
-> cannot silently change what runs.
-
-Only `esbuild` needs a build allowance, and it comes in as a transitive dependency of
-**vitest** — the test runner, not the build. The client bundle is built by `rolldown`, which
-ships prebuilt native bindings and needs no allowance.
-
-### Requirements
-
-The plugin injects `settings`, `webServer` and `tools`, so the profile must mount the web
-app bundle:
-
-```yaml
-dsh:
-  profile:
-    bundles:
-      - '@deepseek-ai/dsh-base'
-      - '@deepseek-ai/dsh-web-app'
-      - '@ian/sc-jira'
-```
-
-Without `dsh-web-app` the entry stays `pending (waiting for service: webServer)` and the
-profile refuses to boot.
-
-### Installing without a restart (via the plugin market)
-
-`dsh plugin add` changes the profile manifest on disk; a running DSH keeps the bundle set it
-started with, so a plain install needs a restart.
-
-The **plugin market** (`dshmarket`) can do better: it mounts a freshly installed plugin into
-the *running* composition through a market-owned Include subtree, so the plugin is live
-immediately — no restart. `sc-jira` is compatible with that path.
-
-The compatibility requirement is narrow: the bundle patch must contain **only plain
-`id`/`name` insert rows** — no `config` blocks, no `disables`, no `!!js` expressions. The
-market's parser rejects anything else and falls back to a restart. This package's patch
-already satisfies it:
-
-```yaml
-- insert:
-    - id: sc-jira
-      name: '@ian/sc-jira'
-```
-
-Verified against the installed market's own parser (`parseSimplePatch` returns
-`[{ id: 'sc-jira', name: '@ian/sc-jira' }]`) and by a live hot-mount: with the plugin
-deliberately kept out of `dsh.profile.bundles`, `POST /dsh-market/toggle` returned
-`"state": "live"`, `"hot": true`, `"restart": false`, and the routes went from `404` to
-`200` on the same process.
-
-Two caveats worth knowing:
-
-- The market's hot-mount writes a **temporary** row under `<profile>/.dsh-market/`, wiped on
-  every boot. Durable state stays with `dsh.profile.bundles`, reconciled by the `dsh` CLI at
-  install time — so the next boot loads the plugin through the normal bundle layer.
-- A hot mount is **process-local**. The plugin's own state (the `scjira` settings namespace,
-  the `meta.json` bindings) lives outside the process and survives either way.
-
-If the hot mount cannot complete — the plugin takes longer than 10s to activate, the include
-plugin is unavailable, or the patch grows a config row — the market falls back to restarting
-the host itself and says so.
+then re-run the `add`. Allowing a build is permission to execute this package's code at install
+time — it is the same permission the plugin already has at runtime, so approve the commits you
+actually installed.
 
 ### From a local checkout
 
 ```bash
-git clone git@github.com:1an-Y1n/sc-jira-dsh.git
-cd sc-jira-dsh
-pnpm install                       # pnpm-workspace.yaml must have allowBuilds.esbuild: true
-pnpm run build                     # tsc + tsdown client bundle + CJS-prelude wrap
+pnpm install
+pnpm run build            # tsc + tsdown client bundle + CJS-prelude wrap
 dsh plugin --profile web add "$(pwd)"
 ```
 
-Either way, restart dsh web afterwards
-(`pkill -f 'dsh web'; setsid dsh web > /tmp/dsh-web-out.log 2> /tmp/dsh-web-err.log < /dev/null &; disown`),
-then open **Settings → 插件 → 插件配置 → Jira** and fill in your credentials.
+Either way, restart `dsh web` afterwards, then fill in the credentials in
+**插件 → 已安装插件 → @ian/sc-jira**.
 
 ### Uninstall
 
@@ -172,98 +124,58 @@ dsh plugin --profile web remove @ian/sc-jira
 
 ## Configure
 
-Credentials live in the `scjira` settings namespace (server / login / API token / display name /
-proxy / scope mode) and are entered in **Settings → 插件 → 插件配置 → Jira**. The token is stored
-with `role('secret')` and is never echoed back by the API.
+| Field | Notes |
+|---|---|
+| `server` | Jira Server root, e.g. `https://jiraprod.sercomm.com` |
+| `login` | The account API calls authenticate as |
+| `token` | API token; stored as a secret and never sent back to the client |
+| `displayName` | Used to match "my" worklogs (`login` OR `displayName`) |
+| `proxy` | Optional; `HTTPS_PROXY` / `HTTP_PROXY` win when set |
+| `storeDir` | Where the session documents live (default as above) |
+| `worklog.minSeconds` | A measured interval shorter than this is refused (default 60) |
+| `worklog.rounding` | Measured durations round **up** to this step (default 60) |
+| `worklog.maxSecondsPerActivity` | Per-activity cap (default 4h) |
 
 ## Tests
 
 ```bash
-pnpm run typecheck          # static — tsc on host + client
-pnpm run lint               # static — oxlint
-pnpm run test               # unit  — vitest (64 tests across 5 files)
-node scripts/probe.mjs      # browser — Playwright smoke test
-node scripts/probe-settings.mjs   # browser — the configuration card
+pnpm test                 # vitest
+pnpm run typecheck        # host + client
 ```
 
 ## Routes
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET    | `/api/scjira/status`             | Plugin health + credential presence (never returns token) |
-| POST   | `/api/scjira/config`             | Partial update of the `scjira` settings namespace |
-| GET    | `/api/scjira/list-my-open`       | Issues assigned to configured user (paginated) |
-| GET    | `/api/scjira/list-worklog-week`  | Weekly worklog totals (`?startDate=YYYY-MM-DD`, defaults to this week) |
-| GET    | `/api/scjira/get-binding`        | Current session → Jira issue binding (`?sessionId=`) |
-| POST   | `/api/scjira/bind`               | Bind a session to a Jira issue |
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/scjira/status` | GET | Credential state (works without a token) |
+| `/api/scjira/config` | POST | Write a partial settings change |
+| `/api/scjira/list-worklog-week` | GET | Weekly report |
+| `/api/scjira/issue` | GET | One issue with comments |
+| `/api/scjira/worklog?sessionId=` | GET | The session's worklog document + totals |
+| `/api/scjira/worklog/edit` | POST | Edit a draft entry |
+| `/api/scjira/worklog/upload` | POST | Upload selected entries |
+| `/api/scjira/worklog/discard` | POST | Discard drafts (synced entries stay) |
 
-All routes except `status` and `config` return 503 with `{ok:false, error:"请先在 Settings 填 Jira credentials"}` if credentials are missing — never 500, never crash.
+## Jira API notes
 
-## Jira REST API version
-
-This plugin targets **Jira Server** (e.g. `jiraprod.sercomm.com`), which serves `/rest/api/2/`.
-Jira Cloud's `/rest/api/3/` returns a different `description` shape (Atlassian Document Format
-instead of a plain string), which this client's field mapping does not handle.
-
-The version lives in one place — `API_VERSION` in `src/jira-client.ts` — and every endpoint is
-built through the `apiUrl()` helper, so there is no second copy of the path to keep in sync.
-
-## Known bug fixes (from scjira v2 spec §6)
-
-Regression coverage in `tests/jira-client.test.ts`, `tests/handlers.test.ts` and `tests/timezone.test.ts`:
-
-1. **bug-2** token-leakage: never echo token in `/status`, Settings card, or logs
-2. **bug-3** timezone: calendar days and week boundaries resolve in `Asia/Shanghai`, not UTC.
-   The naive `new Date().toISOString().slice(0, 10)` returns the UTC date, which is off by one
-   between 00:00 and 08:00 local time — landing on the wrong day *and* the wrong week.
-3. **bug-4** JQL escaping: issue keys passed through `issuetype` filter, not interpolated
-4. **bug-5** worklog pagination: paginate via `startAt`, not truncate at 50
-5. **bug-6** cookie-based auth: prefer `Authorization: Basic` over cookie reuse
-6. **meta.json schemaVersion**: every write bumps `schemaVersion`, refuses to read mismatched
-
-### Fixes added after the initial release
-
-| Area | Problem | Fix |
-|------|---------|-----|
-| `src/timezone.ts` | Host and client each duplicated UTC date arithmetic; `today` was the UTC date, so the week view was wrong 8 hours a day | One shared, dependency-free helper module; both sides use it |
-| `src/handlers.ts` | `handleListMyOpen` fetched a single page of 50 — issues beyond that were silently dropped | `searchAllIssues()` follows every page (`SEARCH_PAGE_SIZE = 100`, the Jira Server cap) |
-| `src/handlers.ts` | `handleListWorklogWeek` also fetched a single page of 100 | Same paginating helper |
-| `src/index.ts` | `POST /config` answered with the `creds` closure variable, but `scope.watch` fires **asynchronously** — the response could echo pre-write values | Read the committed value back from the scope |
-| `src/jira-client.ts` | Three hardcoded `/rest/api/2/` path literals | Single `API_VERSION` constant + `apiUrl()` helper |
-| `src/jira-client.ts` | `search()` had no `startAt` parameter, so pagination was impossible | `startAt` option; omitted when 0 |
+- Jira **Server** REST **v2** (`/rest/api/2`).
+- A worklog body takes **`timeSpent`** (a duration string such as `1h 30m`), not
+  `timeSpentSeconds`; `started` accepts an ISO timestamp with an offset. `adjustEstimate` is
+  rejected by this Jira version, so no estimate linkage is attempted.
+- Timestamps are written with a fixed `+0800` offset: the server runs on Asia/Taipei, which shares
+  the offset with Asia/Shanghai, so a backdated entry lines up with the working day it belongs to.
+- `JiraClient` shells out to `curl` via `child_process` (the sandbox permits spawn but not the
+  network stack from `fetch`). The spawn function is injectable, which is how the tests fake it.
 
 ## Files
 
-```
-sc-jira-dsh/
-├── package.json                       # @ian/sc-jira 0.1.0
-├── cordis.patch.yml                   # bundle declaration
-├── LICENSE                            # MIT
-├── tsconfig.json / tsconfig.client.json
-├── tsdown.config.ts                   # CJS bundle + externals
-├── pnpm-workspace.yaml                # allowBuilds.esbuild: true
-├── src/
-│   ├── index.ts                       # host apply (apply(ctx) function form)
-│   ├── handlers.ts                    # 4 pure handlers + paginating search helper
-│   ├── jira-client.ts                 # Jira REST v2 via curl
-│   ├── timezone.ts                    # Asia/Shanghai day/week helpers (host + client)
-│   ├── storage.ts                     # meta.json + Schemastery schema (role('secret'))
-│   ├── types.ts                       # shared types
-│   └── client/
-│       ├── index.ts                   # client apply: locale + settings.plugin.item + conversation.view
-│       ├── ScjiraSettingsCard.tsx     # the plugin configuration card
-│       ├── JiraLogo.tsx               # the Jira mark
-│       ├── draft.ts                   # the card's form model (pure)
-│       ├── styles.ts                  # the card's stylesheet (namespaced classes)
-│       ├── ScjiraView.tsx             # conversation view: 3 sub-tab panels
-│       ├── locales.ts                 # zh + en dictionaries
-│       └── globals.d.ts               # ambient slots/locale types
-├── tests/                             # vitest suites
-├── scripts/
-│   ├── probe.mjs                      # Playwright smoke
-│   ├── probe-themes.mjs               # theme token probe
-│   ├── inspect-bg.mjs                 # CSS variable probe
-│   ├── chrome.mjs                     # shared Chrome resolution for the probes
-│   └── normalize-client-banner.mjs    # CJS prelude wrap
-└── README.md                          # this file
-```
+- `src/index.ts` — `apply`: config, routes, tools, hooks, commands
+- `src/types.ts` — Jira read shapes and the worklog document
+- `src/session-store.ts` — the per-session document (atomic write, serialized per session)
+- `src/time-policy.ts` — timestamp format, duration derivation, the gap
+- `src/worklog.ts` — pure rules: what is billable, generation, summarization
+- `src/worklog-handlers.ts` — the IO side: bind / record / generate / upload / edit / discard
+- `src/handlers.ts` — the reads: my open issues, one week, one issue
+- `src/jira-client.ts` — curl-backed REST client
+- `src/tool.ts` / `src/lossless.ts` — the tool boundary that makes every value lossless JSON
+- `src/client/` — locale, settings card, the three-tab view, the worklog panel, shared theme

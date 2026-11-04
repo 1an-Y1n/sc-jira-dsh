@@ -1,7 +1,7 @@
 /**
  * Probe for the 5 UI changes:
  *  1. view tab title == "Jira"
- *  2. sub-tabs are "My Open" / "Worklog" / "绑定 Session"
+ *  2. sub-tabs are "本次 Worklog" / "Worklog 周报" / "Issue 详情"
  *  3. tab switch has no loading spinner (data persists)
  *  4. worklog has prev/this-week/next buttons
  *  5. clicking ← shows no loading flash (stale-while-revalidate)
@@ -68,7 +68,7 @@ await page.waitForTimeout(1500)
 const subTabLabels = await page.evaluate(() => {
   return Array.from(document.querySelectorAll('button'))
     .map(b => (b.textContent ?? '').trim())
-    .filter(t => ['My Open', 'Worklog', '绑定 Session', '我的未完成', 'Worklog 周报', 'Jira 集成'].includes(t))
+    .filter(t => ['本次 Worklog', 'Worklog 周报', 'Issue 详情', 'Jira'].includes(t))
 })
 console.log(`[probe] sub-tab labels visible: ${JSON.stringify(subTabLabels)}`)
 
@@ -103,7 +103,7 @@ const jumpInputValue = await page.evaluate(() => {
 const hasJumpInput = /^\d{4}-\d{2}-\d{2}$/.test(jumpInputValue)
 
 // Step 6: switch tabs and verify no loading spinner
-await page.locator('button:has-text("My Open")').last().click({ timeout: 3000 }).catch(() => {})
+await page.locator('button:has-text("Issue 详情")').last().click({ timeout: 3000 }).catch(() => {})
 await page.waitForTimeout(300)
 const loadingOnMyOpen = await page.locator('text=加载中…').count()
 await page.screenshot({ path: `${OUT_DIR}/07-my-open-after-switch.png`, fullPage: true })
