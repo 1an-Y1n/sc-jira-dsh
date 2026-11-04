@@ -1,20 +1,19 @@
 /**
  * The Jira configuration card.
  *
- * It lives in the Plugins section's configurable tab — `settings.plugin.item`,
- * keyed by the `scjira` settings namespace the Host registers — so it sits
- * beside the Bash and Agent Loop cards and inherits their geometry: the same
- * disclosure card, the same field rhythm, the same footer. Nothing here is
- * styled by hand-picked colours: every rule resolves through a `--dsw-alias-*`
- * token, so the card follows the theme instead of fighting it.
+ * It lives on the bundle's own page in the Plugins section — the
+ * `plugins.bundle.config` seat, keyed by the bundle's package name — so the
+ * page finds it without knowing anything about Jira. Nothing here is styled
+ * by hand-picked colours: every rule resolves through a `--dsw-alias-*` token,
+ * so the card follows the theme instead of fighting it.
  *
- * The values live in the Host's `scjira` settings namespace. This card reads
- * them back through the plugin's own status route and writes them through its
- * config route, which keeps the secret handling (a blank token never clears
- * the stored one) in one place — the Host.
+ * The values live in the Host's settings namespace for this plugin's profile
+ * entry. This card reads them back through the plugin's own status route and
+ * writes them through its config route, which keeps the secret handling (a
+ * blank token never clears the stored one) in one place — the Host.
  */
 import * as React from 'react'
-import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { JiraLogo } from './JiraLogo.js'
 import { EMPTY, isDirty, toDraft, type Draft, type StatusResponse } from './draft.js'
 import { ensureStyles } from './styles.js'
@@ -130,7 +129,7 @@ export function ScjiraSettingsCard({ t }: ScjiraSettingsCardProps): React.ReactE
   }
 
   return (
-    <li className={open ? 'scjira-card scjira-cardOpen' : 'scjira-card'}>
+    <div className={open ? 'scjira-card scjira-cardOpen' : 'scjira-card'}>
       <button
         type="button"
         className="scjira-header"
@@ -142,7 +141,7 @@ export function ScjiraSettingsCard({ t }: ScjiraSettingsCardProps): React.ReactE
           <span className="scjira-name">{t('settings.card.name')}</span>
           <span className="scjira-description">{t('settings.card.description')}</span>
         </span>
-        <IconChevronDownOutline14
+        <IconChevronDownOutlineRegular
           className={open ? 'scjira-chevron scjira-chevronOpen' : 'scjira-chevron'}
           size={14}
         />
@@ -271,6 +270,6 @@ export function ScjiraSettingsCard({ t }: ScjiraSettingsCardProps): React.ReactE
           </div>
         </div>
       ) : null}
-    </li>
+    </div>
   )
 }

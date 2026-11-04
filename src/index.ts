@@ -1,17 +1,19 @@
 /**
  * sc-jira HOST apply. Registers:
- *   - Settings namespace 'scjira' (server/login/token/displayName; token is secret)
+ *   - The plugin's own settings form (server/login/token/displayName/proxy/
+ *     scopeMode; the token is secret), keyed by the profile entry id
  *   - 5 HTTP routes at /api/scjira/*
  *   - 4 defineTool mirror (jira_list_my_open, jira_list_worklog_week, jira_get_binding, jira_bind)
  *
  * All registrations wrap ctx.effect for automatic dispose.
- * Credentials are cached in a closure (settings.get() is sync but routes are
- * also sync return points — we must not await settings on every request).
+ * The credentials are read live from the volatile Config values the Host
+ * holds, so a settings write is the next request's truth — there is no
+ * second copy to keep in step, and nothing to invalidate.
  */
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 // These imports pull in each package's `declare module '@deepseek-ai/cordis'`
 // augmentation so ctx.settings / ctx.tools / ctx.webServer become typed.
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { SettingsForms } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // A VALUE import, not a type-only one: `dsh-agent` carries the `declare
 // module '@deepseek-ai/cordis'` augmentation that declares `agent/pre-step`
@@ -58,13 +60,68 @@ import type { AutoWorklogConfig } from './types.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
+/**
+ * The source of a message this plugin contributes to the model's context.
+ *
+ * The harness has no shared "plugin" source kind: the vocabulary is
+ * merge-extensible, each producer declares its own, and a consumer that meets
+ * an unknown kind falls through it as opaque content. So sc-jira declares its
+ * own — the two messages it contributes (the bound-issue context and the
+ * out-of-scope notice) are both `snapshot` form: a later snapshot from this
+ * producer supersedes an earlier one.
+ */
+export interface ScjiraSource {
+  readonly kind: 'sc-jira'
+  readonly form: 'snapshot'
+  /** The named contributions this snapshot assembled, in order. */
+  readonly sections: readonly { readonly name: string; readonly text: string }[]
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'sc-jira': ScjiraSource
+  }
+}
+
 export const name = 'sc-jira'
 
+/**
+ * The plugin's configuration.
+ *
+ * The six credential fields are volatile: the Host holds their resolved values
+ * live and the settings card writes through them without remounting the
+ * plugin. `token` is secret, so it is redacted on the way to the client — the
+ * client learns that a token is set, never what it is — and it carries no
+ * default, so an unset token reads as absent rather than as an empty string.
+ */
 export const Config = Schema.object({
   tasksDir: Schema.string().default(
     join(homedir(), '.dsh', 'profiles', 'web', 'scjira', 'tasks'),
   ),
+  server: Schema.string().default('https://jiraprod.sercomm.com').volatile(),
+  login: Schema.string().default('A003688').volatile(),
+  token: Schema.string().role('secret').volatile(),
+  displayName: Schema.string().default('Ian Yin').volatile(),
+  proxy: Schema.string().default('').volatile(),
+  scopeMode: Schema.string().default(DEFAULT_SCOPE_MODE).volatile(),
 })
+
+/**
+ * The plugin's resolved configuration.
+ *
+ * A volatile field arrives as a live reference rather than as a value:
+ * `get()` returns what the Host currently holds, so a settings write is
+ * visible to the next read without a remount.
+ */
+export interface ScjiraConfig {
+  tasksDir: string
+  server: Volatile<string>
+  login: Volatile<string>
+  token: Volatile<string | undefined>
+  displayName: Volatile<string>
+  proxy: Volatile<string>
+  scopeMode: Volatile<string>
+}
 
 export const inject = ['settings', 'webServer', 'tools'] as const
 
@@ -79,10 +136,17 @@ interface WebServerHost {
   }): () => void
 }
 
-// Minimal settings scope we use
-interface ScjiraSettingsScope<T> {
-  get(): T
-  watch(cb: (next: T) => void): () => void
+/**
+ * The loader entry that owns this plugin instance.
+ *
+ * The profile entry id IS the settings namespace: the Host keys every
+ * settings form by the id the profile gave the entry, so the plugin cannot
+ * choose one — it asks the loader for the id this entry carries.
+ * `cordis-plugin-loader` is not a peer of this plugin, so the slice is
+ * described here rather than imported.
+ */
+interface LoaderEntry {
+  options?: { id?: string }
 }
 
 /** A binding as the hooks need it: the issue, its facts, and its policy. */
@@ -95,39 +159,33 @@ interface CachedBinding {
   startedAtMs: number
 }
 
-export function apply(ctx: Context, config: { tasksDir: string }): void {
-  // After the imports above, ctx.settings is typed as SettingsProvider (from
+export function apply(ctx: Context, config: ScjiraConfig): void {
+  // After the imports above, ctx.settings is typed as SettingsForms (from
   // dsh-settings' module augmentation). We still need a local webServer view
   // because cordis-web-server's .d.ts is not a peer dep of this plugin.
-  const settings = (ctx as Context & { settings: SettingsProvider }).settings
+  const settings: SettingsForms = ctx.settings
   const webServer = (ctx as unknown as { webServer: WebServerHost }).webServer
   const tools = (ctx as unknown as { tools: { register(def: unknown): () => void } }).tools
 
-  // 1. Settings namespace
-  const settingsSchema = Schema.object({
-    server:      Schema.string().default('https://jiraprod.sercomm.com'),
-    login:       Schema.string().default('A003688'),
-    token:       Schema.string().role('secret').default(''),
-    displayName: Schema.string().default('Ian Yin'),
-    proxy:       Schema.string().default(''),
-    scopeMode:   Schema.string().default(DEFAULT_SCOPE_MODE),
-  })
+  // 1. The settings namespace — the profile entry id.
+  const entryId = (ctx.fiber as unknown as { entry?: LoaderEntry }).entry?.options?.id
 
-  let creds: ScjiraSettings
-  // Kept so the /config route can read the *committed* value back after a
-  // write. `scope.watch` fires asynchronously, so the `creds` closure
-  // variable may still hold the previous value at the moment we answer.
-  let scope: ScjiraSettingsScope<ScjiraSettings>
-  ctx.effect(() => {
-    scope = settings.register('scjira' as never, settingsSchema) as ScjiraSettingsScope<ScjiraSettings>
-    creds = scope.get()
-    return scope.watch(next => {
-      creds = next
-      // Token/credential change: force rebuild on next makeClient()
-      client = null
-      clientFingerprint = ''
-    })
-  })
+  /**
+   * The live Jira credentials.
+   *
+   * Every credential is a volatile Config value: the Host holds the resolved
+   * value and the settings card writes through it. Reading through getters
+   * keeps ONE copy of the truth — a value written in the settings card is the
+   * value the next request sees, with no cache to invalidate.
+   */
+  const creds: ScjiraSettings = {
+    get server() { return config.server.get() },
+    get login() { return config.login.get() },
+    get token() { return config.token.get() ?? '' },
+    get displayName() { return config.displayName.get() },
+    get proxy() { return config.proxy.get() },
+    get scopeMode() { return resolveScopeMode(config.scopeMode.get()) },
+  }
 
   // 2. JiraClient singleton — survives across HTTP requests. Rebuilt when
   // creds change (token rotation). No in-memory cache: every call hits Jira
@@ -190,12 +248,17 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         return
       }
 
-      // Settings write — accepts partial update of scjira namespace
+      // Settings write — accepts a partial update of the plugin's settings.
       if (route === 'config' && method === 'POST') {
         let body = ''
         req.on('data', c => { body += c })
         req.on('end', async () => {
           try {
+            if (entryId === undefined) {
+              res.writeHead(500, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: 'this plugin instance has no profile entry, so its settings namespace is unknown' }))
+              return
+            }
             const parsed = JSON.parse(body) as { server?: string; login?: string; displayName?: string; token?: string; proxy?: string; scopeMode?: string }
             const ops: Array<{ op: 'set'; path: string[]; value: string }> = []
             if (parsed.server !== undefined) ops.push({ op: 'set', path: ['server'], value: parsed.server })
@@ -209,12 +272,11 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
             }
             // Only write token if user supplied one (preserves existing on empty)
             if (parsed.token) ops.push({ op: 'set', path: ['token'], value: parsed.token })
-            await settings.mutate('scjira' as never, ops)
-            // Read the committed value back from the scope rather than the
-            // `creds` closure: `scope.watch` runs asynchronously, so `creds`
-            // can still hold the pre-write value at this point and the client
-            // would render stale values after a successful save.
-            const saved = scope.get()
+            await settings.mutate(entryId, ops)
+            // Read the committed values back rather than echoing what was
+            // asked for: the Host owns the result, and a value it refused
+            // must not be reported to the client as saved.
+            const saved = creds
             res.writeHead(200, { 'content-type': 'application/json' })
             res.end(JSON.stringify({
               ok: true,
@@ -1043,11 +1105,13 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     return value
   }
 
-  // A binding change invalidates the cache: the next lookup re-reads the
-  // index rather than serving the previous binding.
-  ctx.effect(() => scope.watch(() => {
-    bindingCache.clear()
-  }))
+  // A settings change invalidates the cache: the next lookup re-reads the
+  // index rather than serving a binding resolved against the old server.
+  // The Host announces every committed settings write for the entry it
+  // belongs to.
+  ctx.on('settings/document-updated', (ns) => {
+    if (ns === entryId) bindingCache.clear()
+  })
 
   ctx.on('agent/pre-step', async (
     payload: { agent: { id: string } },
@@ -1071,7 +1135,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
         ...decision.messages,
         createUserMessage({
           content: [{ type: 'text', text }],
-          source: { kind: 'plugin', plugin: name, form: 'snapshot', sections: [{ name: 'scjira', text }] },
+          source: { kind: 'sc-jira', form: 'snapshot', sections: [{ name: 'scjira', text }] },
         }),
       ],
     }
@@ -1102,7 +1166,7 @@ export function apply(ctx: Context, config: { tasksDir: string }): void {
     const text = renderScopeNotice(binding, target)
     const notice = createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: name, form: 'snapshot', sections: [{ name: 'scjira', text }] },
+      source: { kind: 'sc-jira', form: 'snapshot', sections: [{ name: 'scjira', text }] },
     })
     return {
       ...decision,

@@ -1,8 +1,8 @@
 /**
  * sc-jira CLIENT apply. Registers:
  *   - locale dictionary (zh-CN + en-US) — namespace 'scjira'
- *   - Configuration card (slot 'settings.plugin.item', key 'scjira') that
- *     appears under 插件 → 插件配置, beside the harness's own plugin cards
+ *   - Configuration card (slot 'plugins.bundle.config', key '@ian/sc-jira')
+ *     that appears on the bundle's own page under 插件 → 已安装插件
  *   - Conversation view (slot 'conversation.view', id 'sc-jira') that appears as
  *     a tab next to Trajectory, with 3 sub-tabs: 我的未完成 / Worklog 周报 / 绑定 Session
  *
@@ -19,6 +19,17 @@ export const name = 'sc-jira-client'
 export const inject = ['slots', 'locale'] as const
 
 const NS = 'scjira'
+
+/**
+ * The bundle's package name.
+ *
+ * A plugin that lives outside the harness repository is a BUNDLE, and the
+ * plugin manager gives it a page of its own. `plugins.bundle.config` is the
+ * seat that page reserves for the bundle's configuration, keyed by the
+ * bundle's package name — the one name both sides already hold, so the page
+ * finds the card without learning what the settings namespace means.
+ */
+const BUNDLE = '@ian/sc-jira'
 
 /** One row of the picker's list. */
 interface SelectOption {
@@ -79,31 +90,34 @@ async function fetchJson<T>(path: string): Promise<T> {
 }
 
 export function apply(ctx: Context): void {
-  // 1. Locale — §6.5 fix: try/catch + single-locale fallback
-  try {
-    ctx.locale.register(NS, { zh, en })
-  } catch {
+  // 1. Locale.
+  //
+  // The namespace is ours, so it is not in the harness's merge table, and the
+  // single-locale form is the one the locale service publishes for namespaces
+  // outside it. One call per locale, so a partially registered namespace is
+  // still usable: a client half that loads twice throws on the second
+  // registration of the same (namespace, locale) pair, and that must not take
+  // the card and the view tab down with it.
+  for (const [locale, dict] of Object.entries({ zh, en })) {
     try {
-      ctx.locale.register(NS, { zh })
+      ctx.locale.register(NS, locale, dict)
     } catch {
-      // already registered with single locale; safe to ignore
+      // Already registered under this locale — safe to ignore.
     }
   }
 
-  // 2. The configuration card, in the Plugins section's configurable tab.
+  // 2. The configuration card, on the bundle's own page in the plugin manager.
   //
-  // DSH keeps a plugin's own configuration under 插件 → 插件配置, and
-  // `settings.plugin.item` is the seat it reserves for plugins that live
-  // outside the harness repository: the key is the settings namespace the
-  // Host registered, and the tab pairs the two without learning what the
-  // namespace means. sc-jira registers the `scjira` namespace, so keying the
-  // card by it puts the card in that list — beside the Bash and Agent Loop
-  // cards, in their geometry, with the Jira mark instead of a gear.
-  ctx.slots.inject('settings.plugin.item', () =>
+  // DSH gives every plugin that lives OUTSIDE the harness repository a page
+  // of its own under 插件 → 已安装插件, and `plugins.bundle.config` is the
+  // seat that page reserves for the bundle's configuration. The key is the
+  // bundle's package name, so the page finds the card without having to
+  // learn what the settings namespace means.
+  ctx.slots.inject('plugins.bundle.config', () =>
     ctx.slots.register(
       {
-        name: 'settings.plugin.item',
-        key: 'scjira',
+        name: 'plugins.bundle.config',
+        key: BUNDLE,
         locale: NS,
       },
       ScjiraSettingsCard as never,

@@ -11,11 +11,54 @@ import type { ComponentType } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 
 interface LocaleRuntime {
-  register(
-    ns: string,
-    dicts: { zh: Record<string, string>; en: Record<string, string> } | { zh: Record<string, string> },
-  ): void
+  /**
+   * The single-locale form — the one published for namespaces outside the
+   * harness's merge table, which is what ours is. Registers one dictionary
+   * under one locale of one namespace; a second registration of the same
+   * (namespace, locale) pair throws.
+   */
+  register(ns: string, locale: string, dict: Record<string, string>): () => void
+  /** The all-locales-in-one-call form. */
+  register(ns: string, dicts: Record<string, Record<string, string>>): () => void
   bind(ns: string): (key: string, params?: Record<string, string | number>) => string
+}
+
+/** A list-entry display label: plain text, or a thunk re-read per render. */
+type SlotLabel = string | (() => string)
+
+/**
+ * The options every registration carries.
+ *
+ * `name` is the slot it contributes into; `locale` names the dictionary
+ * namespace whose translated seat the framework puts on the component props;
+ * `inject` supplies the registrant's own business face.
+ */
+interface SlotEntryOptions {
+  name: string
+  locale?: string
+  registrant?: string
+  inject?: (...args: any[]) => unknown
+}
+
+/**
+ * A keyed slot: one cell per key. `priority` ranks the cell's occupants —
+ * the lowest live one renders, so a second registration at the same priority
+ * throws.
+ */
+interface KeyedSlotOptions extends SlotEntryOptions {
+  key: string
+  priority?: number
+}
+
+/**
+ * A list slot: one cell per id. `order` is the display order, `label` the
+ * entry's name in the list.
+ */
+interface ListSlotOptions extends SlotEntryOptions {
+  id: string
+  order?: number
+  label?: SlotLabel
+  priority?: number
 }
 
 interface SlotsRuntime {
@@ -23,18 +66,15 @@ interface SlotsRuntime {
     name: Name,
     factory: () => (() => void) | void,
   ): void
-  // Target shape varies per slot name. Settings uses `id`; conversation.view
-  // inject may take a sessionId argument.
+  /**
+   * Contribute a component to a slot.
+   *
+   * The target shape follows the slot's cardinality: a keyed slot takes
+   * `key`, a list slot takes `id` (plus `order` and `label`), and a
+   * conversation view's inject may take a sessionId argument.
+   */
   register(
-    target: {
-      name: string
-      id?: string
-      key?: string
-      order?: number
-      label?: () => string
-      locale?: string
-      inject?: (...args: any[]) => unknown
-    },
+    target: KeyedSlotOptions | ListSlotOptions,
     component: ComponentType<any>,
   ): () => void
 }

@@ -23,7 +23,6 @@ const CSS = `
   border: 1px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-3);
   border-radius: 12px;
-  list-style: none;
   transition: border-color .16s, background .16s;
 }
 .scjira-card:hover {

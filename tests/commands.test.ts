@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { writeMetaWithBinding } from '../src/storage.js'
 import { appendWorklog } from '../src/worklog-ledger.js'
+import { makeConfig } from './fakes.js'
 
 /**
  * The three human commands.
@@ -12,24 +13,15 @@ import { appendWorklog } from '../src/worklog-ledger.js'
  * thing worth testing is what it says and what it does to the binding — not
  * the model.
  */
-function makeContext(creds: Record<string, unknown> = {}) {
+function makeContext() {
   const commands = new Map<string, any>()
   const routes: any[] = []
   const tools = new Map<string, any>()
 
   const settings = {
-    register: (_ns: string, _schema: any) => ({
-      get: () => ({
-        server: 'https://jiratest.example.com',
-        login: 'A003688',
-        token: '',
-        displayName: 'Ian Yin',
-        proxy: '',
-        scopeMode: 'advisory',
-        ...creds,
-      }),
-      watch: (_cb: any) => () => {},
-    }),
+    mutate: async () => {},
+    update: async () => {},
+    replace: async () => {},
   }
 
   const commandsService = {
@@ -43,6 +35,7 @@ function makeContext(creds: Record<string, unknown> = {}) {
     settings,
     webServer: { register: (route: any) => { routes.push(route); return () => {} } },
     tools: { register: (tool: any) => { tools.set(tool.name, tool); return () => {} } },
+    fiber: { entry: { options: { id: 'sc-jira' } } },
     effect: (fn: () => any) => fn(),
     on: () => () => {},
     get: (name: string) => (name === 'commands' ? commandsService : undefined),
@@ -51,9 +44,9 @@ function makeContext(creds: Record<string, unknown> = {}) {
   return { ctx, commands, routes, tools }
 }
 
-async function applyPlugin(ctx: any, tasksDir: string) {
+async function applyPlugin(ctx: any, tasksDir: string, creds: Record<string, string> = {}) {
   const { apply } = await import('../src/index.js')
-  apply(ctx, { tasksDir })
+  apply(ctx, makeConfig(tasksDir, creds))
 }
 
 describe('/jira-bind', () => {
