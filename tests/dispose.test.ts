@@ -54,7 +54,13 @@ function makeContext() {
   return { ctx, routes, tools, settingsMutations, disposers }
 }
 
-/** A request that delivers its body when the route handler asks for it. */
+/**
+ * A request that delivers its body the way IncomingMessage does.
+ *
+ * The route reads the body with `for await`, which is what a real
+ * IncomingMessage supports; the fake is async-iterable for that reason. It
+ * also keeps `on('data' | 'end')` so a handler written either way works.
+ */
 function makeRequest(method: string, url: string, body = '') {
   const listeners: Record<string, Array<(arg?: unknown) => void>> = {}
   const req: any = {
@@ -64,7 +70,11 @@ function makeRequest(method: string, url: string, body = '') {
       ;(listeners[event] ??= []).push(cb)
       return req
     },
+    async *[Symbol.asyncIterator]() {
+      if (body !== '') yield body
+    },
   }
+  // Compatibility path for a handler that still listens for events.
   const flush = async () => {
     for (const cb of listeners.data ?? []) cb(body)
     for (const cb of listeners.end ?? []) await cb()
@@ -92,33 +102,38 @@ function makeResponse() {
 }
 
 describe('host plugin dispose', () => {
-  it('registers 1 route prefix + 3 tools on apply', async () => {
+  it('registers 1 route prefix + 9 tools on apply', async () => {
     const { ctx, routes, tools, disposers } = makeContext()
     const { apply } = await import('../src/index.js')
     apply(ctx, makeConfig())
-    // One prefix carries every read route; the plugin has no second surface.
+    // One prefix carries every route.
     expect(routes.length).toBe(1)
-    expect(tools.size).toBe(3)
-    // 3 tool registrations + 1 webServer registration
-    expect(disposers.length).toBe(4)
+    expect(tools.size).toBe(9)
+    // 9 tool registrations + 1 webServer registration (+ any command effects,
+    // and this context offers no commands service).
+    expect(disposers.length).toBe(10)
   })
 
-  it('all 3 expected tool names are registered', async () => {
+  it('all 9 expected tool names are registered', async () => {
     const { ctx, tools } = makeContext()
     const { apply } = await import('../src/index.js')
     apply(ctx, makeConfig())
-    expect(tools.has('jira_list_my_open')).toBe(true)
-    expect(tools.has('jira_list_worklog_week')).toBe(true)
-    expect(tools.has('jira_issue')).toBe(true)
+    for (const name of [
+      'jira_list_my_open', 'jira_list_worklog_week', 'jira_issue',
+      'jira_bind', 'jira_unbind', 'jira_record_activity',
+      'jira_worklog_state', 'jira_generate_worklog', 'jira_upload_worklog',
+    ]) {
+      expect(tools.has(name), name).toBe(true)
+    }
   })
 
-  it('registers no hook and no command', async () => {
+  it('subscribes to exactly the two hooks it uses', async () => {
     const { ctx } = makeContext()
     const subscriptions: string[] = []
     ctx.on = (name: string) => { subscriptions.push(name); return () => {} }
     const { apply } = await import('../src/index.js')
     apply(ctx, makeConfig())
-    expect(subscriptions).toEqual([])
+    expect(subscriptions).toEqual(['agent/pre-step', 'agent/turn-stopping'])
   })
 
   it('route prefix is /api/scjira', async () => {

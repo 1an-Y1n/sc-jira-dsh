@@ -1,20 +1,62 @@
 /**
  * sc-jira locale dictionaries. zh-CN is the default (per spec §4.3).
  *
- * The plugin is read-only, so the dictionaries only describe what it shows:
- * one week of worklogs, and one issue with its comments.
+ * The plugin shows one session's worklog round, one week of Jira worklogs, and
+ * one issue — so the dictionaries describe those three reads plus the review
+ * actions on a generated draft.
  */
 
 export const zh = {
-  'tab.worklog': 'Worklog 周报',
-  'tab.issue': 'Issue 详情',
-  'view.worklog': 'Worklog 周报',
+  'view.session': '本次 Worklog',
+  'view.week': 'Worklog 周报',
   'view.issue': 'Issue 详情',
   'status.empty': '暂无数据',
-  'error.network': '网络异常',
-  'error.auth': '认证失败',
-  'worklog.updating': '更新中…',
   'status.loading': '加载中…',
+  'error.network': '网络异常',
+
+  // 本次 Worklog
+  'worklog.unbound': '本 session 还没有绑定 ticket。在对话里说「/jira-bind DZ300-xxxx」或让我帮你绑。',
+  'worklog.recorded': '已记录',
+  'worklog.records': '条',
+  'worklog.measured': '宿主测量',
+  'worklog.gap': '缺口',
+  'worklog.activities': '活动记录',
+  'worklog.noActivities': '还没有记录。工作中每完成一段，agent 会写一条（也可以在对话里让它记）。',
+  'worklog.draft': 'Worklog 草稿',
+  'worklog.generatedAt': '生成于',
+  'worklog.noDraft': '还没有生成草稿。记录完成后，在对话里让我生成 worklog。',
+  'worklog.when': '时间',
+  'worklog.duration': '用时',
+  'worklog.comment': '说明',
+  'worklog.state': '状态',
+  'worklog.selectEntry': '选择 {id}',
+  'worklog.select': '选择',
+  'worklog.selectAll': '全选待传',
+  'worklog.clearSelection': '清除选择',
+  'worklog.selectFirst': '先勾选要上传的条目',
+  'worklog.uploadSelected': '上传选中的 {count} 条',
+  'worklog.uploaded': '已上传 {count} 条到 Jira',
+  'worklog.uploadPartial': '成功 {ok} 条，失败 {failed} 条（失败的条目可以重试）',
+  'worklog.uploadFailed': '上传失败',
+  'worklog.edit': '编辑',
+  'worklog.editTitle': '修改草稿',
+  'worklog.minutes': '分钟',
+  'worklog.save': '保存',
+  'worklog.cancel': '取消',
+  'worklog.edited': '已保存',
+  'worklog.editFailed': '保存失败',
+  'worklog.discard': '丢弃草稿',
+  'worklog.discarded': '已丢弃 {count} 条草稿（已上传的不动）',
+  'worklog.discardFailed': '丢弃失败',
+  'worklog.pending': '待传',
+  'worklog.synced': '已同步',
+  'worklog.failed': '失败',
+  'worklog.hint': '生成由 agent 完成（在对话里说「生成 worklog」）；上传只发生在你勾选之后。',
+
+  // 周报
+  'worklog.updating': '更新中…',
+
+  // Issue 详情
   'issue.key': 'Issue Key',
   'issue.placeholder': '输入 Jira key，如 DZ300-1826',
   'issue.lookup': '查询',
@@ -28,6 +70,8 @@ export const zh = {
   'issue.assignee': '负责人',
   'issue.duedate': '截止',
   'issue.commentFailed': '评论读取失败：{error}',
+
+  // 设置
   'settings.nav': 'Jira',
   'settings.card.name': 'Jira',
   'settings.card.description': 'Jira Server 凭据与连接设置',
@@ -51,19 +95,57 @@ export const zh = {
   'settings.saved': '已保存',
   'settings.saveFailed': '保存失败',
   'guide.title': 'sc-jira',
-  'guide.description': 'Jira issues & worklog（只读）',
+  'guide.description': 'Jira issues & worklog',
 }
 
 export const en = {
-  'tab.worklog': 'Worklog week',
-  'tab.issue': 'Issue',
-  'view.worklog': 'Worklog week',
+  'view.session': 'This worklog',
+  'view.week': 'Worklog week',
   'view.issue': 'Issue',
   'status.empty': 'No data',
-  'error.network': 'Network error',
-  'error.auth': 'Auth failed',
-  'worklog.updating': 'Updating…',
   'status.loading': 'Loading…',
+  'error.network': 'Network error',
+
+  'worklog.unbound': 'This session is not bound to a ticket yet. Say "/jira-bind DZ300-xxxx" in the conversation, or ask me to bind it.',
+  'worklog.recorded': 'Recorded',
+  'worklog.records': 'records',
+  'worklog.measured': 'Measured',
+  'worklog.gap': 'Gap',
+  'worklog.activities': 'Activity records',
+  'worklog.noActivities': 'Nothing recorded yet. The agent adds a line as work completes — or ask it to.',
+  'worklog.draft': 'Worklog draft',
+  'worklog.generatedAt': 'generated',
+  'worklog.noDraft': 'No draft yet. Once the records are in, ask me to generate the worklog.',
+  'worklog.when': 'When',
+  'worklog.duration': 'Time',
+  'worklog.comment': 'Note',
+  'worklog.state': 'State',
+  'worklog.selectEntry': 'Select {id}',
+  'worklog.select': 'Select',
+  'worklog.selectAll': 'Select pending',
+  'worklog.clearSelection': 'Clear selection',
+  'worklog.selectFirst': 'Select the entries to upload first',
+  'worklog.uploadSelected': 'Upload {count} selected',
+  'worklog.uploaded': 'Uploaded {count} entries to Jira',
+  'worklog.uploadPartial': '{ok} uploaded, {failed} failed (a failed entry can be retried)',
+  'worklog.uploadFailed': 'Upload failed',
+  'worklog.edit': 'Edit',
+  'worklog.editTitle': 'Edit draft entry',
+  'worklog.minutes': 'Minutes',
+  'worklog.save': 'Save',
+  'worklog.cancel': 'Cancel',
+  'worklog.edited': 'Saved',
+  'worklog.editFailed': 'Save failed',
+  'worklog.discard': 'Discard draft',
+  'worklog.discarded': 'Discarded {count} entries (uploaded ones stay)',
+  'worklog.discardFailed': 'Discard failed',
+  'worklog.pending': 'pending',
+  'worklog.synced': 'synced',
+  'worklog.failed': 'failed',
+  'worklog.hint': 'The agent generates the draft (ask for it in the conversation); uploading only happens after you select entries.',
+
+  'worklog.updating': 'Updating…',
+
   'issue.key': 'Issue key',
   'issue.placeholder': 'Enter a Jira key, e.g. DZ300-1826',
   'issue.lookup': 'Open',
@@ -77,6 +159,7 @@ export const en = {
   'issue.assignee': 'Assignee',
   'issue.duedate': 'Due',
   'issue.commentFailed': 'Comments could not be read: {error}',
+
   'settings.nav': 'Jira',
   'settings.card.name': 'Jira',
   'settings.card.description': 'Jira Server credentials and connection',
@@ -100,5 +183,5 @@ export const en = {
   'settings.saved': 'Saved',
   'settings.saveFailed': 'Save failed',
   'guide.title': 'sc-jira',
-  'guide.description': 'Jira issues & worklog (read-only)',
+  'guide.description': 'Jira issues & worklog',
 }

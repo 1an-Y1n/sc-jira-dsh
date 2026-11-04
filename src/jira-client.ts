@@ -234,6 +234,48 @@ export class JiraClient {
     return this.tryParse<RawWorklogPage>(body)
   }
 
+  // --- worklog write -------------------------------------------------------
+  //
+  // Jira Server's worklog API takes `timeSpent` (a Jira duration string, e.g.
+  // "1h 30m") and an optional `started` with an explicit offset. The body does
+  // NOT accept `timeSpentSeconds`, and `adjustEstimate` is rejected by this
+  // Jira version, so neither is sent.
+  //
+  // Uploading is the only write this plugin makes, and it happens only when a
+  // person selected the entry in the panel (or explicitly asked the agent to
+  // upload it).
+
+  /**
+   * Add a worklog entry to an issue.
+   * @param key - issue key, e.g. `DZ300-797`.
+   * @param opts.seconds - duration in seconds; sent as a Jira duration string.
+   * @param opts.comment - worklog comment.
+   * @param opts.started - ISO timestamp with offset, e.g. `2026-11-04T09:00:00.000+0800`.
+   * @returns the created worklog, or the failure kind.
+   */
+  async addWorklog(
+    key: string,
+    opts: { seconds: number; comment?: string; started?: string; signal?: AbortSignal },
+  ): Promise<JiraResult<RawWorklog>> {
+    if (!KEY_RE.test(key)) {
+      return { ok: false, error: 'http', detail: 'invalid key format' }
+    }
+    if (!Number.isFinite(opts.seconds) || opts.seconds <= 0) {
+      return { ok: false, error: 'http', detail: 'invalid seconds' }
+    }
+    const payload: Record<string, unknown> = { timeSpent: formatDuration(opts.seconds) }
+    if (opts.comment !== undefined && opts.comment !== '') payload.comment = opts.comment
+    if (opts.started !== undefined && opts.started !== '') payload.started = opts.started
+    const { status, body } = await this.curl(
+      apiUrl(this.creds.server, `/issue/${key}/worklog`),
+      opts.signal,
+      { method: 'POST', body: payload },
+    )
+    const bad = this.classify(status, body)
+    if (bad) return bad
+    return this.tryParse<RawWorklog>(body)
+  }
+
   async search(opts: {
     jql: string
     maxResults?: number

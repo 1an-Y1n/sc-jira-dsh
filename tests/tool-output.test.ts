@@ -114,19 +114,26 @@ describe('the registered tools', () => {
     return { ctx, tools }
   }
 
-  it('are exactly the three reads, and every one is a read', async () => {
+  it('are the nine expected tools and no others', async () => {
     const { ctx, tools } = makeContext()
     const { apply } = await import('../src/index.js')
     apply(ctx, makeConfig())
 
     expect([...tools.keys()].sort()).toEqual([
+      'jira_bind',
+      'jira_generate_worklog',
       'jira_issue',
       'jira_list_my_open',
       'jira_list_worklog_week',
+      'jira_record_activity',
+      'jira_unbind',
+      'jira_upload_worklog',
+      'jira_worklog_state',
     ])
-    // No write surface: the plugin cannot change anything on the tracker.
-    for (const name of ['jira_comment', 'jira_bind', 'jira_unbind', 'jira_log_worklog',
-      'jira_upload_worklogs', 'jira_current', 'jira_get_binding', 'jira_summarize', 'jira_worklogs']) {
+    // The v3 surface is gone: no scope query, no ledger read, no summary,
+    // and no second way to write a comment.
+    for (const name of ['jira_get_binding', 'jira_current', 'jira_comment',
+      'jira_log_worklog', 'jira_worklogs', 'jira_upload_worklogs', 'jira_summarize']) {
       expect(tools.has(name)).toBe(false)
     }
   })

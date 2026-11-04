@@ -4,11 +4,11 @@
  *   - Configuration card (slot 'plugins.bundle.config', key '@ian/sc-jira')
  *     that appears on the bundle's own page under 插件 → 已安装插件
  *   - Conversation view (slot 'conversation.view', id 'sc-jira') that appears as
- *     a tab next to Trajectory, with 2 sub-tabs: Worklog 周报 / Issue 详情
+ *     a tab next to Trajectory, with 3 sub-tabs: 本次 Worklog / Worklog 周报 /
+ *     Issue 详情
  *
- * Both surfaces are read-only: they render what the Host read from Jira and
- * nothing else, so there is no command picker, no session binding, and no
- * local state to register.
+ * The view names its session so the worklog panel can read that session's
+ * document; the card and the view are otherwise pure renderers.
  *
  * All registrations are idempotent: locale uses try/catch per spec §6.5;
  * slots.register is effect-wrapped for dispose.
@@ -79,7 +79,7 @@ export function apply(ctx: Context): void {
         order: 20,  // trajectory is order 10; we sit just after it
         locale: NS,
         label: () => ctx.locale.bind(NS)('settings.nav'),
-        inject: () => ({ t: ctx.locale.bind(NS) }),
+        inject: (sessionId: string) => ({ t: ctx.locale.bind(NS), sessionId }),
       },
       ScjiraView as never,
     ),

@@ -1,7 +1,7 @@
 {
   "name": "@ian/sc-jira",
   "version": "0.2.0",
-  "description": "DSH plugin: Jira read-only integration — Worklog 周报 / Issue 详情",
+  "description": "DSH plugin: Jira session worklog — bind, record, generate, upload; plus issue and weekly reads",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

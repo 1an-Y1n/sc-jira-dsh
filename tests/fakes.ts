@@ -1,4 +1,5 @@
 import type { ScjiraConfig } from '../src/index.js'
+import { DEFAULT_WORKLOG_POLICY } from '../src/types.js'
 
 /** A volatile reference that always reads the same value. */
 export function volatile<T>(value: T) {
@@ -13,7 +14,10 @@ export function volatile<T>(value: T) {
  * the tools need. The plugin stores nothing of its own, so there is no
  * directory to point at.
  */
-export function makeConfig(creds: Record<string, string> = {}): ScjiraConfig {
+export function makeConfig(
+  creds: Record<string, string> = {},
+  over: Partial<Pick<ScjiraConfig, 'storeDir' | 'worklog'>> = {},
+): ScjiraConfig {
   const value = (key: string, fallback: string) => volatile(creds[key] ?? fallback)
   return {
     server: value('server', 'https://jiratest.example.com'),
@@ -21,5 +25,7 @@ export function makeConfig(creds: Record<string, string> = {}): ScjiraConfig {
     token: value('token', ''),
     displayName: value('displayName', 'Ian Yin'),
     proxy: value('proxy', ''),
+    storeDir: over.storeDir ?? '/tmp/scjira-test-sessions',
+    worklog: over.worklog ?? DEFAULT_WORKLOG_POLICY,
   }
 }

@@ -1,22 +1,47 @@
 /**
  * ScjiraView — the conversation.view entry surfaced next to Trajectory.
- * Renders two read-only sub-tabs:
- *   - Worklog 周报: GET /api/scjira/list-worklog-week
- *   - Issue 详情:  GET /api/scjira/issue?key=…
+ * Renders three sub-tabs:
+ *   - 本次 Worklog: the session's own round (bind / record / generate / upload)
+ *   - Worklog 周报:  GET /api/scjira/list-worklog-week
+ *   - Issue 详情:    GET /api/scjira/issue?key=…
  *
- * Nothing here writes, binds, or records: both tabs render what Jira already
- * knows. `t` arrives from the locale inject face; the panel surfaces a hint
- * when credentials are missing or the read fails.
+ * `t` and `sessionId` arrive from the locale inject face; the view only needs
+ * the session to name whose worklog document it reads.
  */
 import * as React from 'react'
 import type { DayTotal } from '../types.js'
 import { addDays, mondayOf, todayIso } from '../timezone.js'
+import {
+  ACCENT,
+  ACCENT_BAR,
+  ACCENT_STRONG,
+  BORDER,
+  BORDER_SOFT,
+  FG,
+  FG_FAINT,
+  FG_MUTED,
+  INPUT_BG,
+  browseUrl,
+  cardStyle,
+  fmtInstant,
+  fmtSeconds,
+  ghostButtonStyle,
+  inputStyle,
+  primaryButtonStyle,
+  tabBarStyle,
+  tabBtn,
+  tableStyle,
+  tdStyle,
+  thStyle,
+} from './theme.js'
+import { WorklogPanel } from './WorklogPanel.js'
 
 interface ScjiraViewProps {
   t: (key: string, params?: Record<string, string | number>) => string
+  sessionId: string
 }
 
-type SubTab = 'worklog' | 'issue'
+type SubTab = 'session' | 'week' | 'issue'
 
 interface WorklogWeekResponse {
   ok: boolean
@@ -112,112 +137,6 @@ async function jiraServerAddress(fetchJson: ScjiraRuntime['fetchJson']): Promise
       })
   }
   return serverAddressPending
-}
-
-/**
- * The browsable address of an issue, built from the server address.
- *
- * The `/browse/<key>` form is Jira Server's own issue permalink; the
- * trailing slashes are trimmed so a configured `https://host/` and
- * `https://host` produce the same link.
- */
-function browseUrl(server: string | null | undefined, key: string | undefined): string | undefined {
-  if (server === undefined || server === null || server === '') return undefined
-  if (key === undefined || key === '') return undefined
-  return `${server.replace(/\/+$/, '')}/browse/${key}`
-}
-
-// Color tokens — use DSH's own theme-aware CSS custom properties so the
-// panel automatically matches whichever theme the user has selected (light,
-// dark, or "follow system"). DSH declares these on <body>; because CSS
-// variables cascade, the values resolve correctly inside any React subtree.
-//
-// Probed via scripts/inspect-bg.mjs:
-//   --dsw-alias-bg-base          : #fff (light)  / dark in dark
-//   --dsw-alias-bg-overlay       : #e9ecf2 (light) / tinted dark in dark
-//   --dsw-alias-label-primary    : #0f1115 (light) / near-white in dark
-//   --dsw-alias-label-secondary  : #61666b (light) / muted in dark
-//   --dsw-alias-label-tertiary   : #81858c (light) / faint in dark
-//   --dsw-alias-border-l1..l4    : rgba(0,0,0,X) — works on both via overlay
-//   --dsw-alias-button-ghost-active-fill : #ebeef2 (light) / tinted in dark
-// ACCENT stays hardcoded (DSH has no theme-aware link color); mid-blue
-// `#2684ff` reads as a link on both light and dark surfaces.
-const PANEL_BG       = 'var(--dsw-alias-bg-base)'
-const FG             = 'var(--dsw-alias-label-primary)'
-const FG_MUTED       = 'var(--dsw-alias-label-secondary)'
-const FG_FAINT       = 'var(--dsw-alias-label-tertiary)'
-const BORDER         = 'var(--dsw-alias-border-l2)'
-const BORDER_SOFT    = 'var(--dsw-alias-border-l1)'
-const INPUT_BG       = 'var(--dsw-alias-bg-overlay)'
-const ACCENT         = '#2684ff'
-const ACCENT_BAR     = '#2684ff'
-const ACCENT_STRONG  = '#4c9aff'
-
-const cardStyle: React.CSSProperties = {
-  padding: '12px 16px',
-  background: PANEL_BG,
-  color: FG,
-  height: '100%',
-  display: 'flex',
-  flexDirection: 'column',
-  minHeight: 0,
-}
-
-const tabBarStyle: React.CSSProperties = {
-  display: 'flex',
-  gap: 4,
-  borderBottom: `1px solid ${BORDER}`,
-  marginBottom: 12,
-}
-
-const TAB_ACTIVE_BG = 'var(--dsw-alias-button-ghost-active-fill)'
-
-const tabBtn = (active: boolean): React.CSSProperties => ({
-  padding: '6px 12px',
-  background: active ? TAB_ACTIVE_BG : 'transparent',
-  color: active ? ACCENT : FG_MUTED,
-  border: 'none',
-  borderBottom: active ? `2px solid ${ACCENT}` : '2px solid transparent',
-  cursor: 'pointer',
-  font: 'inherit',
-})
-
-const tableStyle: React.CSSProperties = {
-  width: '100%',
-  borderCollapse: 'collapse',
-  font: '13px/20px sans-serif',
-  color: FG,
-}
-const thStyle: React.CSSProperties = {
-  textAlign: 'left',
-  padding: '8px 10px 6px',
-  color: FG_MUTED,
-  fontWeight: 500,
-  fontSize: 12,
-  textTransform: 'uppercase',
-  letterSpacing: '0.04em',
-}
-const tdStyle: React.CSSProperties = {
-  padding: '10px 10px',
-  color: FG,
-  verticalAlign: 'top',
-  borderBottom: `1px solid ${BORDER_SOFT}`,
-}
-
-function fmtSeconds(s: number): string {
-  if (!s || s <= 0) return '0s'
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
-}
-
-/** `2026-11-04T03:10:11.000+0800` → `11-04 11:10`, keeping the wall clock. */
-function fmtInstant(iso: string): string {
-  if (!iso) return ''
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso)
-  if (m === null) return iso
-  return `${m[2]}-${m[3]} ${m[4]}:${m[5]}`
 }
 
 function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: ScjiraRuntime['fetchJson'] }): React.ReactElement {
@@ -636,26 +555,33 @@ function IssuePanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: Scji
   )
 }
 
-export function ScjiraView({ t }: ScjiraViewProps): React.ReactElement {
-  const [tab, setTab] = React.useState<SubTab>('worklog')
+export function ScjiraView({ t, sessionId }: ScjiraViewProps): React.ReactElement {
+  const [tab, setTab] = React.useState<SubTab>('session')
   const rt = React.useMemo(getRuntime, [])
 
   return (
     <div style={cardStyle}>
       <div style={tabBarStyle}>
-        <button type="button" style={tabBtn(tab === 'worklog')} onClick={() => setTab('worklog')}>
-          {t('view.worklog')}
+        <button type="button" style={tabBtn(tab === 'session')} onClick={() => setTab('session')}>
+          {t('view.session')}
+        </button>
+        <button type="button" style={tabBtn(tab === 'week')} onClick={() => setTab('week')}>
+          {t('view.week')}
         </button>
         <button type="button" style={tabBtn(tab === 'issue')} onClick={() => setTab('issue')}>
           {t('view.issue')}
         </button>
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-        {/* Both panels stay mounted across tab switches (display:none for the
-            inactive one). Without this, every tab switch unmounts + remounts
-            the panel, which re-fires the week fetch and shows "加载中…" until
-            Jira responds — and would throw away a typed issue key. */}
-        <div style={{ display: tab === 'worklog' ? 'block' : 'none' }}>
+        {/* All three panels stay mounted across tab switches (display:none for
+            the inactive one). Without this, every switch unmounts + remounts
+            the panel: the week fetch would flash "加载中…" and a typed issue
+            key would be thrown away. The worklog panel polls, so an unmount
+            would also stop it noticing what the agent just recorded. */}
+        <div style={{ display: tab === 'session' ? 'block' : 'none' }}>
+          <WorklogPanel sessionId={sessionId} t={t} fetchJson={rt.fetchJson} />
+        </div>
+        <div style={{ display: tab === 'week' ? 'block' : 'none' }}>
           <WorklogWeekPanel t={t} fetchJson={rt.fetchJson} />
         </div>
         <div style={{ display: tab === 'issue' ? 'block' : 'none' }}>
