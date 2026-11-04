@@ -88,6 +88,14 @@ export interface MetaJsonV3 {
     priority: string
     duedate: string
     url: string
+    /**
+     * Who the issue is assigned to.
+     *
+     * Optional because a binding written before the field existed carries
+     * none: an absent assignee means "unknown", and every reader has to
+     * report that as an absent field rather than as a value.
+     */
+    assignee?: string
   }
   logCount: number
   logBytes: number

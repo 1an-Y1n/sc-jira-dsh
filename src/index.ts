@@ -15,6 +15,12 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 // augmentation so ctx.settings / ctx.tools / ctx.webServer become typed.
 import type { SettingsForms } from '@deepseek-ai/dsh-settings'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type {
+  DefineToolOptions,
+  ParameterSchemaSpec,
+  ToolDefinition,
+  ValueSchemaSpec,
+} from '@deepseek-ai/dsh-tools'
 // A VALUE import, not a type-only one: `dsh-agent` carries the `declare
 // module '@deepseek-ai/cordis'` augmentation that declares `agent/pre-step`
 // on the Events map, and a type-only import is elided — the augmentation
@@ -25,7 +31,7 @@ import type { PostToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import Schema from '@deepseek-ai/schemastery'
-import type { ScjiraSettings } from './types.js'
+import type { MetaJsonV4, ScjiraSettings } from './types.js'
 import { DEFAULT_SCOPE_MODE } from './types.js'
 import { JiraClient, formatDuration } from './jira-client.js'
 import {
@@ -56,6 +62,7 @@ import {
   handleUploadWorklogs,
 } from './worklog-handlers.js'
 import { appendSessionLog, describeToolCall, writeSummary } from './session-log.js'
+import { lossless } from './lossless.js'
 import type { AutoWorklogConfig } from './types.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -84,6 +91,28 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 export const name = 'sc-jira'
+
+/**
+ * Define one Jira tool.
+ *
+ * Every tool's canonical value passes through `lossless` on the way out.
+ * DSH snapshots that value as JSON and refuses one it cannot carry: a
+ * property set to `undefined` — an issue that has no assignee, a binding
+ * that does not exist — makes the whole call fail with "value is not
+ * lossless JSON", and the model gets that error instead of the answer it
+ * asked for. An absent field is omitted here, once, for every tool.
+ */
+function defineJiraTool<const S extends ParameterSchemaSpec, const O extends ValueSchemaSpec>(
+  options: DefineToolOptions<S, O>,
+): ToolDefinition {
+  const execute = options.execute
+  return defineTool<S, O>({
+    ...options,
+    async execute(args, exec) {
+      return lossless(await execute(args, exec))
+    },
+  })
+}
 
 /**
  * The plugin's configuration.
@@ -153,7 +182,13 @@ interface LoaderEntry {
 interface CachedBinding {
   key: string
   summary: string
-  issueSummary: Record<string, string>
+  /**
+   * The issue's facts as the binding stored them.
+   *
+   * The stored shape, not a loose record: the assignee is optional, and a
+   * binding written before that field existed simply has none.
+   */
+  issueSummary: MetaJsonV4['issueSummary']
   autoWorklog: AutoWorklogConfig
   /** When the binding started, in epoch milliseconds. */
   startedAtMs: number
@@ -451,7 +486,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
   }))
 
   // 4. Tools (mirror of the 4 handlers, callable from agent)
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_list_my_open',
     description: '列出分配给当前用户的未完成 Jira issues',
     parameters: {},
@@ -477,7 +512,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_list_worklog_week',
     description: '列出当前用户在指定周（默认本周）的 worklog',
     parameters: {
@@ -515,7 +550,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_get_binding',
     description: '查询指定 DSH session 是否已绑定到 Jira issue',
     parameters: {
@@ -546,7 +581,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_bind',
     description: '将当前 DSH session 绑定到一个 Jira issue key',
     parameters: {
@@ -593,7 +628,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
   // list of tool names. The agent's own summary is what the work actually
   // was, so the agent writes it — and a turn it did not summarize simply has
   // no summary file, which is more honest than a hollow one.
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_summarize',
     description: '记录本轮工作的摘要（写入本 session 绑定 issue 的 summary/N.json）',
     parameters: {
@@ -672,7 +707,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
    */
   const lastRecordedAt = new Map<string, number>()
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_issue',
     description: '读取一个 Jira issue 的详情（描述全文 + 评论列表）',
     parameters: {
@@ -728,7 +763,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_log_worklog',
     description: '在本地工时账本记一条工时（只写本地，不上传 Jira）',
     parameters: {
@@ -813,7 +848,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_worklogs',
     description: '读取本地工时账本（各条记录的时长、说明与上传状态）',
     parameters: {
@@ -876,7 +911,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_upload_worklogs',
     description: '把本地工时账本中已选定的条目上传到 Jira（默认上传全部待传条目；不会上传已同步的条目）',
     parameters: {
@@ -930,7 +965,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_comment',
     description: '在 Jira issue 上添加一条评论',
     parameters: {
@@ -970,7 +1005,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_current',
     description: '查看当前 session 的 Jira 绑定详情与已记工时统计',
     parameters: {},
@@ -1033,7 +1068,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     },
   })))
 
-  ctx.effect(() => tools.register(defineTool({
+  ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_unbind',
     description: '解除当前 session 与 Jira issue 的绑定（本地工时记录保留）',
     parameters: {},
@@ -1097,7 +1132,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
       : {
           key: detail.key,
           summary: detail.summary,
-          issueSummary: detail.issueSummary as unknown as Record<string, string>,
+          issueSummary: detail.issueSummary,
           autoWorklog: detail.autoWorklog,
           startedAtMs: Date.parse(detail.startedAt),
         }

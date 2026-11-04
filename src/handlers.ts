@@ -279,6 +279,7 @@ export async function handleBind(
   }
   const summary = env.body.fields?.summary ?? ''
   const statusName = env.body.fields?.status?.name ?? ''
+  const assignee = env.body.fields?.assignee?.displayName ?? ''
   await writeMetaWithBinding(deps.tasksDir, {
     key: args.taskKey,
     sessionId: args.sessionId,
@@ -289,6 +290,10 @@ export async function handleBind(
       priority: env.body.fields?.priority?.name ?? '',
       duedate: env.body.fields?.duedate ?? '',
       url: `${deps.creds.server}/browse/${args.taskKey}`,
+      // The assignee is part of the binding's facts: the scope context names
+      // it, and `jira_current` reports it. Absent when Jira has no assignee
+      // — the field is then simply not there.
+      ...(assignee === '' ? {} : { assignee }),
     },
   })
   return { ok: true, key: args.taskKey, sessionId: args.sessionId, summary }
