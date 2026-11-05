@@ -144,6 +144,28 @@ describe('host plugin dispose', () => {
     expect(routes[0].kind).toBe('prefix')
   })
 
+  it('serves /list-my-open (and 404s an unknown read) once a token is configured', async () => {
+    // A token plus an unreachable server: the route reaches its handler, which
+    // reports the network failure, so the 502 proves the route exists while
+    // keeping the test offline.
+    const { ctx, routes } = makeContext()
+    const { apply } = await import('../src/index.js')
+    apply(ctx, makeConfig({ token: 'x', server: 'http://127.0.0.1:9' }))
+
+    const mine = makeRequest('GET', '/api/scjira/list-my-open')
+    const mineRes = makeResponse()
+    await routes[0].handler(mine.req, mineRes)
+    await mine.flush()
+    expect(mineRes.statusCode).toBe(502)
+    expect(JSON.parse(mineRes.payload).jql).toContain('resolution = Unresolved')
+
+    const unknown = makeRequest('GET', '/api/scjira/nope')
+    const unknownRes = makeResponse()
+    await routes[0].handler(unknown.req, unknownRes)
+    await unknown.flush()
+    expect(unknownRes.statusCode).toBe(404)
+  })
+
   it('a read route refuses to run without a token instead of calling Jira', async () => {
     const { ctx, routes } = makeContext()
     const { apply } = await import('../src/index.js')

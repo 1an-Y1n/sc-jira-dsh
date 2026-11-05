@@ -2,9 +2,9 @@
  * sc-jira HOST apply. Registers:
  *   - The plugin's own settings form (credentials + the worklog policy),
  *     keyed by the profile entry id
- *   - 9 HTTP routes at /api/scjira/*: four reads (status, config, issue,
- *     list-worklog-week) and five worklog operations (state, edit, activity,
- *     upload, discard)
+ *   - 10 HTTP routes at /api/scjira/*: five reads (status, config, issue,
+ *     list-my-open, list-worklog-week) and five worklog operations (state,
+ *     edit, activity, upload, discard)
  *   - 9 tools: 3 reads and 6 worklog operations
  *   - 2 hooks: a one-line reminder before each step, the turn clock at the
  *     end of each turn
@@ -333,6 +333,11 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
 
       try {
         const jira = makeClient()
+        if (route === 'list-my-open' && method === 'GET') {
+          const r = await handleListMyOpen({ jira, creds })
+          json(r.ok ? 200 : 502, r)
+          return
+        }
         if (route === 'list-worklog-week' && method === 'GET') {
           const r = await handleListWorklogWeek({ jira, creds }, { startDate: query.get('startDate') ?? undefined })
           json(r.ok ? 200 : 502, r)

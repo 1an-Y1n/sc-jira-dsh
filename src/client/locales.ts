@@ -9,6 +9,7 @@
 export const zh = {
   'view.label': 'Jira 视图',
   'view.session': '本次 Worklog',
+  'view.open': '我的未完成',
   'view.week': 'Worklog 周报',
   'view.issue': 'Issue 详情',
   'status.empty': '暂无数据',
@@ -55,6 +56,14 @@ export const zh = {
   'worklog.hint': '点任意时间、时长或说明可以直接改；已同步的条目会同时更新 Jira。生成由 agent 完成，上传只发生在你勾选之后。',
   'worklog.updating': '更新中…',
 
+  // 我的未完成
+  'open.title': '分配给我、还没完成的 issue',
+  'open.count': '{count} 个 · 已花 {spent}',
+  'open.key': 'Key',
+  'open.summary': '摘要',
+  'open.spent': '已花',
+  'open.empty': '没有未完成的 issue。',
+
   // Issue 详情
   'issue.key': 'Issue Key',
   'issue.placeholder': '输入 Jira key，如 DZ300-1826',
@@ -98,6 +107,7 @@ export const zh = {
 export const en = {
   'view.label': 'Jira views',
   'view.session': 'This worklog',
+  'view.open': 'My open',
   'view.week': 'Worklog week',
   'view.issue': 'Issue',
   'status.empty': 'No data',
@@ -142,6 +152,13 @@ export const en = {
   'worklog.badComment': 'The note cannot be empty',
   'worklog.hint': 'Click any time, duration or note to edit it; a synced entry also updates Jira. The agent generates the draft; uploading only happens after you select entries.',
   'worklog.updating': 'Updating…',
+
+  'open.title': 'Assigned to me, still open',
+  'open.count': '{count} issues · {spent} spent',
+  'open.key': 'Key',
+  'open.summary': 'Summary',
+  'open.spent': 'Spent',
+  'open.empty': 'No open issues.',
 
   'issue.key': 'Issue key',
   'issue.placeholder': 'Enter a Jira key, e.g. DZ300-1826',

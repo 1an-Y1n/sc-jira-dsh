@@ -9,7 +9,7 @@
  * the session to name whose worklog document it reads.
  */
 import * as React from 'react'
-import { SegmentedTabs } from '@deepseek-ai/dsh-client-ui-primitives'
+import { SegmentedTabs, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DayTotal } from '../types.js'
 import { addDays, mondayOf, todayIso } from '../timezone.js'
 import {
@@ -34,6 +34,8 @@ import {
   tableStyle,
   tdStyle,
   thStyle,
+  bodyCell,
+  headCell,
 } from './theme.js'
 import { WorklogPanel } from './WorklogPanel.js'
 
@@ -42,7 +44,23 @@ interface ScjiraViewProps {
   sessionId: string
 }
 
-type SubTab = 'session' | 'week' | 'issue'
+type SubTab = 'session' | 'open' | 'week' | 'issue'
+
+interface ListOpenResponse {
+  ok: boolean
+  issues?: Array<{
+    key: string
+    summary: string
+    statusName: string
+    priority: string
+    duedate: string
+    timeSpentSeconds: number
+    url: string
+  }>
+  totalSpentSeconds?: number
+  jql?: string
+  error?: string
+}
 
 interface WorklogWeekResponse {
   ok: boolean
@@ -138,6 +156,94 @@ async function jiraServerAddress(fetchJson: ScjiraRuntime['fetchJson']): Promise
       })
   }
   return serverAddressPending
+}
+
+/**
+ * 我的未完成 — the account-wide read that has nothing to do with the session.
+ *
+ * It is its own tab rather than a block on the worklog page: this list spans
+ * every ticket, so it belongs beside the session's own round, not inside it.
+ */
+function OpenIssuesPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: ScjiraRuntime['fetchJson'] }): React.ReactElement {
+  const [data, setData] = React.useState<ListOpenResponse | null>(null)
+  const [loading, setLoading] = React.useState(true)
+
+  const reload = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      setData(await fetchJson<ListOpenResponse>('/api/scjira/list-my-open'))
+    } catch {
+      setData({ ok: false, error: t('error.network') })
+    } finally {
+      setLoading(false)
+    }
+  }, [fetchJson, t])
+
+  React.useEffect(() => { void reload() }, [reload])
+
+  if (loading && data === null) {
+    return <div style={{ padding: 12, color: FG_MUTED, fontSize: 13 }}>{t('status.loading')}</div>
+  }
+  if (data?.ok !== true) {
+    return <div style={{ padding: 12, color: FG_MUTED, fontSize: 13 }}>{data?.error ?? t('error.network')}</div>
+  }
+
+  const issues = data.issues ?? []
+  if (issues.length === 0) {
+    return <div style={{ padding: 12, color: FG_MUTED, fontSize: 13 }}>{t('open.empty')}</div>
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: FG_MUTED }}>{t('open.title')}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 12, color: FG_FAINT }}>
+          {t('open.count', { count: issues.length, spent: fmtSeconds(data.totalSpentSeconds ?? 0) })}
+        </span>
+      </div>
+      <div style={{ border: `1px solid ${BORDER_SOFT}`, borderRadius: 8, overflow: 'hidden' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', font: '13px/20px sans-serif' }}>
+          <thead>
+            <tr style={{ background: 'var(--dsw-alias-bg-overlay)' }}>
+              <th style={{ ...headCell, width: 110 }}>{t('open.key')}</th>
+              <th style={headCell}>{t('open.summary')}</th>
+              <th style={{ ...headCell, width: 130 }}>{t('issue.status')}</th>
+              <th style={{ ...headCell, width: 90 }}>{t('issue.priority')}</th>
+              <th style={{ ...headCell, width: 100 }}>{t('issue.duedate')}</th>
+              <th style={{ ...headCell, width: 90, textAlign: 'right' }}>{t('open.spent')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {issues.map(issue => (
+              <tr key={issue.key}>
+                <td style={{ ...bodyCell, whiteSpace: 'nowrap' }}>
+                  <a
+                    href={issue.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: ACCENT, fontWeight: 500, textDecoration: 'none' }}
+                  >
+                    {issue.key}
+                  </a>
+                </td>
+                <td style={bodyCell}>{issue.summary}</td>
+                <td style={bodyCell}>
+                  {issue.statusName === '' ? '—' : <Tag tone="info">{issue.statusName}</Tag>}
+                </td>
+                <td style={{ ...bodyCell, color: issue.priority === 'High' ? FG : FG_MUTED }}>{issue.priority || '—'}</td>
+                <td style={{ ...bodyCell, color: issue.duedate === '' ? FG_FAINT : FG, whiteSpace: 'nowrap' }}>
+                  {issue.duedate || '—'}
+                </td>
+                <td style={{ ...bodyCell, textAlign: 'right', whiteSpace: 'nowrap', color: FG_MUTED }}>
+                  {issue.timeSpentSeconds > 0 ? fmtSeconds(issue.timeSpentSeconds) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
 }
 
 function WorklogWeekPanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: ScjiraRuntime['fetchJson'] }): React.ReactElement {
@@ -564,6 +670,7 @@ export function ScjiraView({ t, sessionId }: ScjiraViewProps): React.ReactElemen
   // views sit in the same control as every other panel in the shell.
   const tabs = [
     { value: 'session' as const, label: t('view.session'), id: 'scjira-tab-session', panelId: 'scjira-panel-session' },
+    { value: 'open' as const, label: t('view.open'), id: 'scjira-tab-open', panelId: 'scjira-panel-open' },
     { value: 'week' as const, label: t('view.week'), id: 'scjira-tab-week', panelId: 'scjira-panel-week' },
     { value: 'issue' as const, label: t('view.issue'), id: 'scjira-tab-issue', panelId: 'scjira-panel-issue' },
   ] as const
@@ -573,7 +680,7 @@ export function ScjiraView({ t, sessionId }: ScjiraViewProps): React.ReactElemen
       {/* Equal-width segments are meant for a bounded row, not the full
           width of a conversation panel: cap it so the three labels read as a
           tab control rather than three large cells. */}
-      <div style={{ paddingBottom: 12, maxWidth: 420 }}>
+      <div style={{ paddingBottom: 12, maxWidth: 560 }}>
         <SegmentedTabs items={tabs} value={tab} onChange={setTab} label={t('view.label')} />
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
@@ -584,10 +691,13 @@ export function ScjiraView({ t, sessionId }: ScjiraViewProps): React.ReactElemen
         <div role="tabpanel" id={tabs[0].panelId} aria-labelledby={tabs[0].id} hidden={tab !== 'session'}>
           <WorklogPanel sessionId={sessionId} t={t} fetchJson={rt.fetchJson} />
         </div>
-        <div role="tabpanel" id={tabs[1].panelId} aria-labelledby={tabs[1].id} hidden={tab !== 'week'}>
+        <div role="tabpanel" id={tabs[1].panelId} aria-labelledby={tabs[1].id} hidden={tab !== 'open'}>
+          <OpenIssuesPanel t={t} fetchJson={rt.fetchJson} />
+        </div>
+        <div role="tabpanel" id={tabs[2].panelId} aria-labelledby={tabs[2].id} hidden={tab !== 'week'}>
           <WorklogWeekPanel t={t} fetchJson={rt.fetchJson} />
         </div>
-        <div role="tabpanel" id={tabs[2].panelId} aria-labelledby={tabs[2].id} hidden={tab !== 'issue'}>
+        <div role="tabpanel" id={tabs[3].panelId} aria-labelledby={tabs[3].id} hidden={tab !== 'issue'}>
           <IssuePanel t={t} fetchJson={rt.fetchJson} />
         </div>
       </div>

@@ -27,7 +27,7 @@ import {
   Tag,
   type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { BORDER_SOFT, FG, FG_FAINT, FG_MUTED, fmtInstant, fmtSeconds } from './theme.js'
+import { BORDER_SOFT, FG, FG_FAINT, FG_MUTED, bodyCell, fmtInstant, fmtSeconds, headCell } from './theme.js'
 
 export interface ActivityView {
   id: string
@@ -622,22 +622,7 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
   )
 }
 
-const headCell: React.CSSProperties = {
-  textAlign: 'left',
-  padding: '8px 10px',
-  fontSize: 12,
-  fontWeight: 600,
-  color: FG_MUTED,
-  borderBottom: `1px solid ${BORDER_SOFT}`,
-  whiteSpace: 'nowrap',
-}
-
-const bodyCell: React.CSSProperties = {
-  padding: '8px 10px',
-  verticalAlign: 'middle',
-  borderBottom: `1px solid ${BORDER_SOFT}`,
-}
-
+/** The raw-record rows are denser than the worklog table. */
 const recordCell: React.CSSProperties = {
   padding: '4px 8px',
   verticalAlign: 'middle',

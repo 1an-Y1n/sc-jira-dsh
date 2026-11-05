@@ -2,8 +2,8 @@
 
 DSH plugin: a Jira integration for the session you are working in.
 
-- **Conversation view** (the tab next to Trajectory), three sub-tabs:
-  **本次 Worklog** / **Worklog 周报** / **Issue 详情**. The worklog tab shows the bound ticket,
+- **Conversation view** (the tab next to Trajectory), four sub-tabs:
+  **本次 Worklog** / **我的未完成** / **Worklog 周报** / **Issue 详情**. The worklog tab shows the bound ticket,
   the entries with their times, and the agent's raw records; every time, duration and note is
   editable in place, and a synced row's edit is pushed to Jira first.
 - **Configuration card** (`插件 → 已安装插件 → @ian/sc-jira`): server / login / API token /
@@ -151,6 +151,7 @@ pnpm run typecheck        # host + client
 |---|---|---|
 | `/api/scjira/status` | GET | Credential state (works without a token) |
 | `/api/scjira/config` | POST | Write a partial settings change |
+| `/api/scjira/list-my-open` | GET | Issues assigned to me that are still open |
 | `/api/scjira/list-worklog-week` | GET | Weekly report |
 | `/api/scjira/issue` | GET | One issue with comments |
 | `/api/scjira/worklog?sessionId=` | GET | The session's worklog document + totals |
@@ -186,6 +187,9 @@ pnpm run typecheck        # host + client
 ## The 本次 Worklog tab
 
 ![The worklog tab](docs/screenshots/worklog-tab.png)
+
+The 我的未完成 tab is the account-wide read (`docs/screenshots/open-issues-tab.png`):
+key, summary, status, priority, due date and time spent, one row per open issue.
 
 The tab leads with the bound ticket, then the worklog rows (id, time, duration, note,
 state) and finally the agent's raw records behind a disclosure row. Click any time,

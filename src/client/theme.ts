@@ -104,6 +104,24 @@ export const ghostButtonStyle: React.CSSProperties = {
   font: 'inherit',
 }
 
+/** Table header cell: quiet, small, one hairline under the row. */
+export const headCell: React.CSSProperties = {
+  textAlign: 'left',
+  padding: '8px 10px',
+  fontSize: 12,
+  fontWeight: 600,
+  color: FG_MUTED,
+  borderBottom: `1px solid ${BORDER_SOFT}`,
+  whiteSpace: 'nowrap',
+}
+
+/** Table body cell: comfortable row height, one hairline between rows. */
+export const bodyCell: React.CSSProperties = {
+  padding: '8px 10px',
+  verticalAlign: 'middle',
+  borderBottom: `1px solid ${BORDER_SOFT}`,
+}
+
 /** `1h 30m` / `45m` / `0s` — the same shape the host reports. */
 export function fmtSeconds(total: number): string {
   const s = Math.max(0, Math.round(total))
