@@ -45,6 +45,11 @@ export interface WorklogJira {
     key: string,
     opts: { seconds: number; comment?: string; started?: string },
   ) => Promise<JiraResult<any>>
+  updateWorklog?: (
+    key: string,
+    worklogId: string,
+    opts: { seconds?: number; comment?: string; started?: string },
+  ) => Promise<JiraResult<any>>
 }
 
 export interface WorklogDeps {
@@ -244,8 +249,15 @@ export async function handleRecordActivity(
 
 // --- state -----------------------------------------------------------------
 
+export interface ActivityState extends Activity {
+  /** The entry that already accounts for this record, or null. */
+  coveredBy: string | null
+  /** Editable only while no entry covers it. */
+  editable: boolean
+}
+
 export interface WorklogState extends WorklogSummary {
-  activities: Activity[]
+  activities: ActivityState[]
   draft: DraftEntry[]
   uncoveredIds: string[]
   generatedAt: string | null
@@ -254,9 +266,16 @@ export interface WorklogState extends WorklogSummary {
 /** Read the whole picture of one session's round. */
 export async function handleWorklogState(deps: WorklogDeps, args: { sessionId: string }): Promise<WorklogState> {
   const doc = await readDoc(deps.storeDir, args.sessionId)
+  const coverOf = new Map<string, string>()
+  for (const entry of doc.draft?.entries ?? []) {
+    for (const id of entry.activityIds) if (!coverOf.has(id)) coverOf.set(id, entry.id)
+  }
   return {
     ...summarizeDoc(doc),
-    activities: doc.activities,
+    activities: doc.activities.map(activity => {
+      const coveredBy = coverOf.get(activity.id) ?? null
+      return { ...activity, coveredBy, editable: coveredBy === null }
+    }),
     draft: doc.draft?.entries ?? [],
     uncoveredIds: uncoveredActivities(doc).map(activity => activity.id),
     generatedAt: doc.draft?.generatedAt ?? null,
@@ -402,13 +421,42 @@ export async function handleEditDraft(
   deps: WorklogDeps,
   args: EditArgs,
 ): Promise<Result<{ entry: DraftEntry }>> {
+  const doc = await readDoc(deps.storeDir, args.sessionId)
+  const target = (doc.draft?.entries ?? []).find(item => item.id === args.id)
+  if (target === undefined) {
+    return { ok: false, error: doc.draft === null ? '还没有生成 worklog 草稿' : `未知条目 ${args.id}` }
+  }
+  if (args.seconds !== undefined) {
+    const checked = explicitSeconds(args.seconds, deps.policy)
+    if (!checked.ok) return { ok: false, error: checked.error }
+  }
+  if (args.startedAt !== undefined && instantOf(args.startedAt) === null) {
+    return { ok: false, error: 'startedAt 必须是带偏移量的 ISO 时间' }
+  }
+
+  // A synced entry lives on the tracker. Push the edit there FIRST, and apply
+  // it locally only when Jira accepted it — the panel must never show a value
+  // the tracker does not have.
+  if (target.state === 'synced') {
+    if (doc.binding === null) return { ok: false, error: '本 session 未绑定 Jira issue' }
+    if (target.jiraId === null) return { ok: false, error: `条目 ${target.id} 没有 Jira id，无法同步修改` }
+    if (deps.jira.updateWorklog === undefined) {
+      return { ok: false, error: '这个 Jira 客户端不支持修改已上传的工时' }
+    }
+    const pushed = await deps.jira.updateWorklog(doc.binding.key, target.jiraId, {
+      ...(args.seconds !== undefined ? { seconds: Math.round(args.seconds) } : {}),
+      ...(args.comment !== undefined && args.comment.trim() !== '' ? { comment: args.comment.trim() } : {}),
+      ...(args.startedAt !== undefined ? { started: args.startedAt } : {}),
+    })
+    if (!pushed.ok) {
+      return { ok: false, error: `Jira 拒绝了这次修改（${pushed.error}${pushed.detail !== undefined ? `: ${pushed.detail}` : ''}），本地未改动` }
+    }
+  }
+
   return updateDocAndInvalidate<Result<{ entry: DraftEntry }>>(deps.storeDir, args.sessionId, current => {
     if (current.draft === null) return { next: null, result: { ok: false as const, error: '还没有生成 worklog 草稿' } }
     const entry = current.draft.entries.find(item => item.id === args.id)
     if (entry === undefined) return { next: null, result: { ok: false as const, error: `未知条目 ${args.id}` } }
-    if (entry.state === 'synced') {
-      return { next: null, result: { ok: false as const, error: '该条已上传 Jira，本地不再修改；要改请到 Jira 侧处理' } }
-    }
     if (args.seconds !== undefined) {
       const checked = explicitSeconds(args.seconds, deps.policy)
       if (!checked.ok) return { next: null, result: { ok: false as const, error: checked.error } }
@@ -426,6 +474,91 @@ export async function handleEditDraft(
     return {
       next: { ...current, draft: { ...current.draft, entries } },
       result: { ok: true as const, entry: edited },
+    }
+  })
+}
+
+export interface EditActivityArgs {
+  sessionId: string
+  id: string
+  summary?: string
+  seconds?: number
+  startedAt?: string
+}
+
+/**
+ * Correct one recorded activity.
+ *
+ * Only while nothing accounts for it yet: once an entry covers the record, the
+ * draft is the thing to edit — changing the record under a generated entry
+ * would leave the two disagreeing with no way to tell which is right.
+ */
+export async function handleEditActivity(
+  deps: WorklogDeps,
+  args: EditActivityArgs,
+): Promise<Result<{ activity: Activity }>> {
+  if (args.summary !== undefined && args.summary.trim() === '') {
+    return { ok: false, error: 'summary 不能为空' }
+  }
+  if (args.seconds !== undefined) {
+    const checked = explicitSeconds(args.seconds, deps.policy)
+    if (!checked.ok) return { ok: false, error: checked.error }
+  }
+  if (args.startedAt !== undefined && instantOf(args.startedAt) === null) {
+    return { ok: false, error: 'startedAt 必须是带偏移量的 ISO 时间' }
+  }
+  return updateDocAndInvalidate<Result<{ activity: Activity }>>(deps.storeDir, args.sessionId, current => {
+    const activity = current.activities.find(item => item.id === args.id)
+    if (activity === undefined) return { next: null, result: { ok: false as const, error: `未知记录 ${args.id}` } }
+    const cover = (current.draft?.entries ?? []).find(entry => entry.activityIds.includes(args.id))
+    if (cover !== undefined) {
+      return {
+        next: null,
+        result: {
+          ok: false as const,
+          error: `这条记录已经生成到草稿 ${cover.id}${cover.state === 'synced' ? '（且已上传 Jira）' : ''}，请直接改草稿条目`,
+        },
+      }
+    }
+    const edited: Activity = {
+      ...activity,
+      summary: args.summary !== undefined ? args.summary.trim() : activity.summary,
+      seconds: args.seconds !== undefined ? Math.round(args.seconds) : activity.seconds,
+      startedAt: args.startedAt !== undefined ? args.startedAt : activity.startedAt,
+      // A corrected duration is the caller's number now, not a measurement.
+      source: args.seconds !== undefined ? 'agent' : activity.source,
+    }
+    return {
+      next: {
+        ...current,
+        activities: current.activities.map(item => item.id === args.id ? edited : item),
+      },
+      result: { ok: true as const, activity: edited },
+    }
+  })
+}
+
+/** Remove one recorded activity, under the same rule as editing it. */
+export async function handleDeleteActivity(
+  deps: WorklogDeps,
+  args: { sessionId: string; id: string },
+): Promise<Result<{ removed: Activity }>> {
+  return updateDocAndInvalidate<Result<{ removed: Activity }>>(deps.storeDir, args.sessionId, current => {
+    const activity = current.activities.find(item => item.id === args.id)
+    if (activity === undefined) return { next: null, result: { ok: false as const, error: `未知记录 ${args.id}` } }
+    const cover = (current.draft?.entries ?? []).find(entry => entry.activityIds.includes(args.id))
+    if (cover !== undefined) {
+      return {
+        next: null,
+        result: {
+          ok: false as const,
+          error: `这条记录已经生成到草稿 ${cover.id}，请先在草稿里丢弃它`,
+        },
+      }
+    }
+    return {
+      next: { ...current, activities: current.activities.filter(item => item.id !== args.id) },
+      result: { ok: true as const, removed: activity },
     }
   })
 }

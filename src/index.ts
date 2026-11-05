@@ -2,9 +2,9 @@
  * sc-jira HOST apply. Registers:
  *   - The plugin's own settings form (credentials + the worklog policy),
  *     keyed by the profile entry id
- *   - 8 HTTP routes at /api/scjira/*: four reads (status, config, issue,
- *     list-worklog-week) and four worklog operations (state, edit, upload,
- *     discard)
+ *   - 9 HTTP routes at /api/scjira/*: four reads (status, config, issue,
+ *     list-worklog-week) and five worklog operations (state, edit, activity,
+ *     upload, discard)
  *   - 9 tools: 3 reads and 6 worklog operations
  *   - 2 hooks: a one-line reminder before each step, the turn clock at the
  *     end of each turn
@@ -31,7 +31,9 @@ import { JiraClient, formatDuration } from './jira-client.js'
 import { handleIssue, handleListMyOpen, handleListWorklogWeek } from './handlers.js'
 import {
   handleBind,
+  handleDeleteActivity,
   handleDiscardWorklog,
+  handleEditActivity,
   handleEditDraft,
   handleGenerateWorklog,
   handleRecordActivity,
@@ -272,6 +274,26 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
               id: String(body.id ?? ''),
               seconds: typeof body.seconds === 'number' ? body.seconds : undefined,
               comment: typeof body.comment === 'string' ? body.comment : undefined,
+              startedAt: typeof body.startedAt === 'string' ? body.startedAt : undefined,
+            })
+            json(r.ok ? 200 : 400, r)
+            return
+          }
+          if (method === 'POST' && pathname.endsWith('/worklog/activity')) {
+            const body = await readBody()
+            const sessionId = String(body.sessionId ?? '')
+            if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
+            const depsForRoute = { storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }
+            if (body.delete === true) {
+              const r = await handleDeleteActivity(depsForRoute, { sessionId, id: String(body.id ?? '') })
+              json(r.ok ? 200 : 400, r)
+              return
+            }
+            const r = await handleEditActivity(depsForRoute, {
+              sessionId,
+              id: String(body.id ?? ''),
+              summary: typeof body.summary === 'string' ? body.summary : undefined,
+              seconds: typeof body.seconds === 'number' ? body.seconds : undefined,
               startedAt: typeof body.startedAt === 'string' ? body.startedAt : undefined,
             })
             json(r.ok ? 200 : 400, r)

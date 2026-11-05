@@ -1,37 +1,33 @@
 /**
- * 「本次 Worklog」 — the panel for the session's own round.
+ * 「本次 Worklog」 — the session's own round, presented in the harness's own
+ * visual language.
  *
- * Three blocks, in the order the work happens:
+ * Layout, top to bottom, each block answering one question:
  *
- *   binding   — which issue, how much is recorded, how much the host measured
- *   activities— what the agent recorded, one line each
- *   draft     — the entries generated from those records, with upload
+ *   ticket   — which issue is this session on, and how far along is the work?
+ *   worklog  — the entries that will reach Jira; every cell is editable
+ *   records  — the agent's raw notes, editable until they are turned into
+ *              entries (after that the draft is the surface to edit)
  *
  * The panel never generates: generation is the agent's answer to the user
- * asking for it. It does own the review — selecting entries, editing a draft,
- * discarding one — because those are decisions about what reaches the tracker.
+ * asking for it. It owns the review — selecting, editing, discarding — because
+ * those are decisions about what reaches the tracker.
+ *
+ * Controls come from `@deepseek-ai/dsh-client-ui-primitives`, so the panel
+ * inherits the harness's buttons, inputs, tags and spacing instead of
+ * imitating them.
  */
 import * as React from 'react'
 import {
-  ACCENT,
-  BORDER,
-  BORDER_SOFT,
-  ERROR,
-  FG,
-  FG_FAINT,
-  FG_MUTED,
-  INPUT_BG,
-  SUCCESS,
-  cardStyle,
-  fmtInstant,
-  fmtSeconds,
-  ghostButtonStyle,
-  inputStyle,
-  primaryButtonStyle,
-  tdStyle,
-  thStyle,
-  tableStyle,
-} from './theme.js'
+  Button,
+  Checkbox,
+  DisclosureRow,
+  IconClockOutlineRegular,
+  Input,
+  Tag,
+  type TagTone,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import { BORDER_SOFT, FG, FG_FAINT, FG_MUTED, fmtInstant, fmtSeconds } from './theme.js'
 
 export interface ActivityView {
   id: string
@@ -40,6 +36,9 @@ export interface ActivityView {
   seconds: number
   turn: number | null
   source: 'agent' | 'derived'
+  /** The entry that already accounts for this record, or null. */
+  coveredBy: string | null
+  editable: boolean
 }
 
 export interface DraftEntryView {
@@ -88,20 +87,148 @@ interface WorklogPanelProps {
 
 const POLL_MS = 4000
 
+/** Section label: the small, quiet heading the harness uses above a group. */
+function SectionLabel({ children, trailing }: { children: React.ReactNode; trailing?: React.ReactNode }): React.ReactElement {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, margin: '18px 0 8px' }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: FG_MUTED, letterSpacing: '0.02em' }}>{children}</span>
+      {trailing !== undefined && <span style={{ marginLeft: 'auto', fontSize: 12, color: FG_FAINT }}>{trailing}</span>}
+    </div>
+  )
+}
+
+/**
+ * One editable cell.
+ *
+ * Renders its text until clicked, then a single-line input: Enter or blur
+ * saves, Escape cancels. `onCommit` may reject — the cell then stays in edit
+ * mode with the message surfaced by the panel, so nothing is lost.
+ */
+function EditCell({
+  label,
+  text,
+  value,
+  width,
+  disabled,
+  onCommit,
+}: {
+  label: string
+  text: string
+  value: string
+  width?: number
+  disabled?: boolean
+  onCommit: (next: string) => Promise<void> | void
+}): React.ReactElement {
+  const [editing, setEditing] = React.useState(false)
+  const [draft, setDraft] = React.useState(value)
+  const [busy, setBusy] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!editing) setDraft(value)
+  }, [value, editing])
+
+  async function commit(): Promise<void> {
+    if (busy) return
+    if (draft === value) { setEditing(false); return }
+    setBusy(true)
+    try {
+      await onCommit(draft)
+      setEditing(false)
+    } catch {
+      // Keep the editor open: the panel shows the reason and the typed value
+      // is still there to fix.
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        title={label}
+        disabled={disabled}
+        onClick={() => { setDraft(value); setEditing(true) }}
+        style={{
+          background: 'transparent',
+          border: 'none',
+          padding: 0,
+          margin: 0,
+          font: 'inherit',
+          color: FG,
+          textAlign: 'left',
+          cursor: disabled === true ? 'default' : 'text',
+          borderBottom: disabled === true ? '1px dotted transparent' : '1px dotted var(--dsw-alias-border-l3)',
+          opacity: disabled === true ? 0.75 : 1,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {text}
+      </button>
+    )
+  }
+
+  return (
+    <Input
+      autoFocus
+      value={draft}
+      aria-label={label}
+      disabled={busy}
+      style={width !== undefined ? { width } : undefined}
+      onChange={event => setDraft(event.target.value)}
+      onBlur={() => { void commit() }}
+      onKeyDown={event => {
+        if (event.key === 'Enter') { event.preventDefault(); void commit() }
+        if (event.key === 'Escape') { event.preventDefault(); setDraft(value); setEditing(false) }
+      }}
+    />
+  )
+}
+
+/** `MM-DD HH:mm` (or a full ISO date) → an ISO instant with +0800, or null. */
+function parseTimeCell(text: string, base: string): string | null {
+  const baseYear = /^(\d{4})-/.exec(base)?.[1] ?? String(new Date().getFullYear())
+  const short = /^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$/.exec(text.trim())
+  if (short !== null) {
+    const [, mo, day, hour, minute] = short
+    const iso = `${baseYear}-${mo!.padStart(2, '0')}-${day!.padStart(2, '0')}T${hour!.padStart(2, '0')}:${minute}:00.000+0800`
+    return Number.isNaN(Date.parse(iso)) ? null : iso
+  }
+  const full = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/.exec(text.trim())
+  if (full !== null) {
+    const [, y, mo, day, hour, minute] = full
+    return `${y}-${mo}-${day}T${hour}:${minute}:00.000+0800`
+  }
+  return null
+}
+
+/** A duration in minutes, as seconds; null when the text is not a positive integer. */
+function parseMinutes(text: string): number | null {
+  const value = Number(text.trim())
+  if (!Number.isFinite(value) || value <= 0) return null
+  return Math.round(value * 60)
+}
+
+function stateTag(t: WorklogPanelProps['t'], entry: DraftEntryView): { tone: TagTone; label: string } {
+  if (entry.state === 'synced') {
+    return { tone: 'success', label: entry.jiraId !== null ? `${t('worklog.synced')} #${entry.jiraId}` : t('worklog.synced') }
+  }
+  if (entry.state === 'failed') return { tone: 'danger', label: t('worklog.failed') }
+  return { tone: 'neutral', label: t('worklog.pending') }
+}
+
 export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): React.ReactElement {
   const [state, setState] = React.useState<WorklogStateResponse | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   const [notice, setNotice] = React.useState<{ tone: 'ok' | 'bad'; text: string } | null>(null)
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
-  const [editing, setEditing] = React.useState<DraftEntryView | null>(null)
+  const [recordsOpen, setRecordsOpen] = React.useState(false)
 
   const reload = React.useCallback(async () => {
     try {
       const r = await fetchJson<WorklogStateResponse>(`/api/scjira/worklog?sessionId=${encodeURIComponent(sessionId)}`)
       setState(r)
-      // Keep only selections that are still pending, so an upload that just
-      // succeeded does not leave a dangling checkbox.
       setSelected(prev => {
         const pending = new Set((r.draft ?? []).filter(entry => entry.state !== 'synced').map(entry => entry.id))
         const next = new Set([...prev].filter(id => pending.has(id)))
@@ -117,21 +244,31 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
   React.useEffect(() => { void reload() }, [reload])
 
   // The agent records while the conversation runs, so the panel refreshes on
-  // its own instead of asking the reader to hit reload.
+  // its own rather than asking the reader to reload.
   React.useEffect(() => {
     const timer = setInterval(() => { void reload() }, POLL_MS)
     return () => clearInterval(timer)
   }, [reload])
 
-  const pending = (state?.draft ?? []).filter(entry => entry.state !== 'synced')
-
-  function toggle(id: string): void {
-    setSelected(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+  /** POST one worklog operation, then refresh; throws so a cell keeps its editor. */
+  async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const r = await fetchJson<T & { ok?: boolean; error?: string }>(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId, ...body }),
+      })
+      await reload()
+      if (r.ok !== true) throw new Error(r.error ?? t('error.network'))
+      return r
+    } catch (err) {
+      setNotice({ tone: 'bad', text: (err as Error).message })
+      throw err
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function upload(ids: string[]): Promise<void> {
@@ -139,354 +276,359 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
       setNotice({ tone: 'bad', text: t('worklog.selectFirst') })
       return
     }
-    setBusy(true)
-    setNotice(null)
     try {
-      const r = await fetchJson<{ ok?: boolean; uploaded?: Array<{ id: string; ok: boolean; error?: string }>; error?: string }>(
-        '/api/scjira/worklog/upload',
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, ids }),
-        },
-      )
-      if (r.ok !== true) {
-        setNotice({ tone: 'bad', text: r.error ?? t('worklog.uploadFailed') })
-      } else {
-        const okCount = (r.uploaded ?? []).filter(item => item.ok).length
-        const failed = (r.uploaded ?? []).filter(item => !item.ok)
-        setNotice(failed.length === 0
-          ? { tone: 'ok', text: t('worklog.uploaded', { count: okCount }) }
-          : { tone: 'bad', text: t('worklog.uploadPartial', { ok: okCount, failed: failed.length }) })
-        setSelected(new Set())
-      }
-      await reload()
+      const r = await post<{ uploaded?: Array<{ ok: boolean }> }>('/api/scjira/worklog/upload', { ids })
+      const ok = (r.uploaded ?? []).filter(item => item.ok).length
+      const failed = (r.uploaded ?? []).length - ok
+      setNotice(failed === 0
+        ? { tone: 'ok', text: t('worklog.uploaded', { count: ok }) }
+        : { tone: 'bad', text: t('worklog.uploadPartial', { ok, failed }) })
+      setSelected(new Set())
     } catch {
-      setNotice({ tone: 'bad', text: t('error.network') })
-    } finally {
-      setBusy(false)
+      // post() already reported it
     }
   }
 
   async function discard(): Promise<void> {
-    setBusy(true)
-    setNotice(null)
     try {
-      const r = await fetchJson<{ ok?: boolean; removed?: number; error?: string }>(
-        '/api/scjira/worklog/discard',
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId }),
-        },
-      )
-      setNotice(r.ok === true
-        ? { tone: 'ok', text: t('worklog.discarded', { count: r.removed ?? 0 }) }
-        : { tone: 'bad', text: r.error ?? t('worklog.discardFailed') })
-      await reload()
+      const r = await post<{ removed?: number }>('/api/scjira/worklog/discard', {})
+      setNotice({ tone: 'ok', text: t('worklog.discarded', { count: r.removed ?? 0 }) })
     } catch {
-      setNotice({ tone: 'bad', text: t('error.network') })
-    } finally {
-      setBusy(false)
+      // reported
     }
   }
 
-  async function saveEdit(entry: DraftEntryView, seconds: number, comment: string): Promise<void> {
-    setBusy(true)
-    setNotice(null)
+  async function saveEntry(entry: DraftEntryView, patch: { seconds?: number; comment?: string; startedAt?: string }): Promise<void> {
     try {
-      const r = await fetchJson<{ ok?: boolean; error?: string }>('/api/scjira/worklog/edit', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId, id: entry.id, seconds, comment }),
+      await post('/api/scjira/worklog/edit', { id: entry.id, ...patch })
+    } catch (err) {
+      throw err
+    }
+  }
+
+  async function saveActivity(activity: ActivityView, patch: { seconds?: number; comment?: string; startedAt?: string }): Promise<void> {
+    try {
+      await post('/api/scjira/worklog/activity', {
+        id: activity.id,
+        seconds: patch.seconds,
+        summary: patch.comment,
+        startedAt: patch.startedAt,
       })
-      setNotice(r.ok === true
-        ? { tone: 'ok', text: t('worklog.edited') }
-        : { tone: 'bad', text: r.error ?? t('worklog.editFailed') })
-      if (r.ok === true) setEditing(null)
-      await reload()
+    } catch (err) {
+      throw err
+    }
+  }
+
+  async function removeActivity(activity: ActivityView): Promise<void> {
+    try {
+      await post('/api/scjira/worklog/activity', { id: activity.id, delete: true })
+      setNotice({ tone: 'ok', text: t('worklog.recordRemoved') })
     } catch {
-      setNotice({ tone: 'bad', text: t('error.network') })
-    } finally {
-      setBusy(false)
+      // reported
     }
   }
 
   if (loading && state === null) {
-    return <div style={{ padding: 12, color: FG_MUTED }}>{t('status.loading')}</div>
+    return <div style={{ padding: 24, color: FG_MUTED, fontSize: 13 }}>{t('status.loading')}</div>
   }
 
   const bound = state?.bound === true
 
+  if (!bound) {
+    return (
+      <div style={{ padding: '32px 16px', textAlign: 'center', color: FG_MUTED, fontSize: 13, lineHeight: '22px' }}>
+        <div style={{ fontSize: 14, color: FG, marginBottom: 6 }}>{t('worklog.unboundTitle')}</div>
+        {t('worklog.unbound')}
+      </div>
+    )
+  }
+
+  const activities = state?.activities ?? []
+  const entries = state?.draft ?? []
+  const pending = entries.filter(entry => entry.state !== 'synced')
+  const gap = Math.abs(state?.gapSeconds ?? 0)
+
   return (
     <div>
-      {/* Binding */}
-      <div style={{ marginBottom: 16, padding: '10px 12px', background: INPUT_BG, borderRadius: 6 }}>
-        {bound ? (
-          <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 10 }}>
-            <a
-              href={state?.url ?? undefined}
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: ACCENT, fontWeight: 600, textDecoration: 'none' }}
-            >
-              {state?.key}
-            </a>
-            <span style={{ fontSize: 13 }}>{state?.summary}</span>
-            <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-              <button type="button" disabled={busy} style={ghostButtonStyle} onClick={() => { void discard() }}>
-                {t('worklog.discard')}
-              </button>
-            </span>
-          </div>
-        ) : (
-          <div style={{ color: FG_MUTED }}>{t('worklog.unbound')}</div>
-        )}
+      {/* Ticket */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <a
+            href={state?.url ?? undefined}
+            target="_blank"
+            rel="noreferrer"
+            style={{ fontSize: 15, fontWeight: 600, color: 'var(--dsw-alias-label-link, #2684ff)', textDecoration: 'none' }}
+          >
+            {state?.key}
+          </a>
+          {state?.statusName != null && state.statusName !== '' && <Tag tone="info">{state.statusName}</Tag>}
+          <span style={{ marginLeft: 'auto' }}>
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => { void discard() }}>
+              {t('worklog.discard')}
+            </Button>
+          </span>
+        </div>
+        <div style={{ marginTop: 4, fontSize: 13, color: FG, lineHeight: '20px' }}>{state?.summary}</div>
+        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', fontSize: 12, color: FG_MUTED }}>
+          <span>{t('worklog.recorded')} <strong style={{ color: FG }}>{fmtSeconds(state?.recordedSeconds ?? 0)}</strong> · {state?.activityCount ?? 0} {t('worklog.records')}</span>
+          <span>{t('worklog.measured')} <strong style={{ color: FG }}>{fmtSeconds(state?.measuredSeconds ?? 0)}</strong></span>
+          {gap > 0 && <Tag tone="warning">{t('worklog.gap')} {fmtSeconds(gap)}</Tag>}
+        </div>
       </div>
 
-      {bound && (
-        <>
-          {/* Totals */}
-          <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 14, fontSize: 13, color: FG_MUTED }}>
-            <span>{t('worklog.recorded')}: <strong style={{ color: FG }}>{fmtSeconds(state?.recordedSeconds ?? 0)}</strong> / {state?.activityCount ?? 0} {t('worklog.records')}</span>
-            <span>{t('worklog.measured')}: <strong style={{ color: FG }}>{fmtSeconds(state?.measuredSeconds ?? 0)}</strong></span>
-            <span>
-              {t('worklog.gap')}:{' '}
-              <strong style={{ color: (state?.gapSeconds ?? 0) === 0 ? FG : FG_FAINT }}>
-                {fmtSeconds(Math.abs(state?.gapSeconds ?? 0))}
-              </strong>
-            </span>
-          </div>
+      {/* Worklog */}
+      <SectionLabel trailing={t('worklog.entriesCount', { count: entries.length, pending: pending.length })}>
+        {t('worklog.draft')}
+      </SectionLabel>
 
-          {/* Activities */}
-          <div style={{ marginBottom: 6, color: FG_MUTED, fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+      {entries.length === 0 ? (
+        <div style={{ padding: '10px 12px', background: 'var(--dsw-alias-bg-overlay)', borderRadius: 8, color: FG_MUTED, fontSize: 13, lineHeight: '20px' }}>
+          {activities.length === 0 ? t('worklog.noActivities') : t('worklog.noDraft')}
+        </div>
+      ) : (
+        <div style={{ border: `1px solid ${BORDER_SOFT}`, borderRadius: 8, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', font: '13px/20px sans-serif' }}>
+            <thead>
+              <tr style={{ background: 'var(--dsw-alias-bg-overlay)' }}>
+                <th style={{ ...headCell, width: 96 }}>{t('worklog.id')}</th>
+                <th style={headCell}>{t('worklog.when')}</th>
+                <th style={{ ...headCell, width: 90 }}>{t('worklog.duration')}</th>
+                <th style={headCell}>{t('worklog.comment')}</th>
+                <th style={{ ...headCell, width: 120 }}>{t('worklog.state')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(entry => {
+                const tag = stateTag(t, entry)
+                return (
+                  <tr key={entry.id}>
+                    <td style={{ ...bodyCell, whiteSpace: 'nowrap' }}>
+                      {/* The primitive's checkbox carries its label visibly:
+                          the entry id is useful to show anyway — it is what
+                          the upload call and the panel's messages name. */}
+                      <Checkbox
+                        checked={selected.has(entry.id)}
+                        disabled={entry.state === 'synced' || busy}
+                        label={entry.id}
+                        onChange={() => {
+                          setSelected(prev => {
+                            const next = new Set(prev)
+                            if (next.has(entry.id)) next.delete(entry.id)
+                            else next.add(entry.id)
+                            return next
+                          })
+                        }}
+                      />
+                    </td>
+                    <td style={{ ...bodyCell, whiteSpace: 'nowrap', color: FG_MUTED }}>
+                      <EditCell
+                        label={t('worklog.when')}
+                        text={fmtInstant(entry.startedAt)}
+                        value={fmtInstant(entry.startedAt)}
+                        disabled={busy}
+                        onCommit={async text => {
+                          const iso = parseTimeCell(text, entry.startedAt)
+                          if (iso === null) throw new Error(t('worklog.badTime'))
+                          await saveEntry(entry, { startedAt: iso })
+                        }}
+                      />
+                    </td>
+                    <td style={{ ...bodyCell, whiteSpace: 'nowrap' }}>
+                      <EditCell
+                        label={t('worklog.duration')}
+                        text={fmtSeconds(entry.seconds)}
+                        value={String(Math.round(entry.seconds / 60))}
+                        width={64}
+                        disabled={busy}
+                        onCommit={async text => {
+                          const seconds = parseMinutes(text)
+                          if (seconds === null) throw new Error(t('worklog.badDuration'))
+                          await saveEntry(entry, { seconds })
+                        }}
+                      />
+                    </td>
+                    <td style={bodyCell}>
+                      <EditCell
+                        label={t('worklog.comment')}
+                        text={entry.comment}
+                        value={entry.comment}
+                        disabled={busy}
+                        onCommit={async text => {
+                          const trimmed = text.trim()
+                          if (trimmed === '') throw new Error(t('worklog.badComment'))
+                          await saveEntry(entry, { comment: trimmed })
+                        }}
+                      />
+                      {entry.error !== null && (
+                        <div style={{ color: 'var(--dsw-alias-label-danger, #de350b)', fontSize: 12, marginTop: 2 }}>{entry.error}</div>
+                      )}
+                    </td>
+                    <td style={bodyCell}>
+                      <Tag tone={tag.tone}>{tag.label}</Tag>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {entries.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={busy || pending.length === 0}
+            onClick={() => { void upload([...selected]) }}
+          >
+            {t('worklog.uploadSelected', { count: selected.size })}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy || pending.length === 0}
+            onClick={() => setSelected(new Set(pending.map(entry => entry.id)))}
+          >
+            {t('worklog.selectAll')}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy || selected.size === 0}
+            onClick={() => setSelected(new Set())}
+          >
+            {t('worklog.clearSelection')}
+          </Button>
+        </div>
+      )}
+
+      {/* Raw records — the agent's notes; editable until they become entries. */}
+      {activities.length > 0 && (
+        <>
+          <SectionLabel
+            trailing={t('worklog.recordsCount', { count: activities.length, locked: activities.filter(item => !item.editable).length })}
+          >
             {t('worklog.activities')}
-          </div>
-          {(state?.activities ?? []).length === 0 ? (
-            <div style={{ padding: '6px 0', color: FG_MUTED, fontSize: 13 }}>{t('worklog.noActivities')}</div>
-          ) : (
-            <table style={{ ...tableStyle, marginBottom: 18 }}>
+          </SectionLabel>
+          <DisclosureRow
+            icon={<IconClockOutlineRegular />}
+            title={recordsOpen ? t('worklog.hideRecords') : t('worklog.showRecords')}
+            open={recordsOpen}
+            expandable
+            expandOnRowClick
+            onToggle={() => setRecordsOpen(open => !open)}
+          >
+            <table style={{ width: '100%', borderCollapse: 'collapse', font: '12px/18px sans-serif' }}>
               <tbody>
-                {(state?.activities ?? []).map(activity => (
+                {activities.map(activity => (
                   <tr key={activity.id}>
-                    <td style={{ ...tdStyle, color: FG_MUTED, whiteSpace: 'nowrap', width: 110 }}>{fmtInstant(activity.startedAt)}</td>
-                    <td style={{ ...tdStyle, whiteSpace: 'nowrap', width: 70 }}>{fmtSeconds(activity.seconds)}</td>
-                    <td style={tdStyle}>{activity.summary}</td>
-                    <td style={{ ...tdStyle, color: FG_FAINT, whiteSpace: 'nowrap', width: 90, textAlign: 'right' }}>
-                      {activity.turn !== null ? `turn ${activity.turn}` : ''}
+                    <td style={{ ...recordCell, whiteSpace: 'nowrap', width: 110, color: FG_MUTED }}>
+                      <EditCell
+                        label={t('worklog.when')}
+                        text={fmtInstant(activity.startedAt)}
+                        value={fmtInstant(activity.startedAt)}
+                        disabled={busy || !activity.editable}
+                        onCommit={async text => {
+                          const iso = parseTimeCell(text, activity.startedAt)
+                          if (iso === null) throw new Error(t('worklog.badTime'))
+                          await saveActivity(activity, { startedAt: iso })
+                        }}
+                      />
+                    </td>
+                    <td style={{ ...recordCell, whiteSpace: 'nowrap', width: 70 }}>
+                      <EditCell
+                        label={t('worklog.duration')}
+                        text={fmtSeconds(activity.seconds)}
+                        value={String(Math.round(activity.seconds / 60))}
+                        width={64}
+                        disabled={busy || !activity.editable}
+                        onCommit={async text => {
+                          const seconds = parseMinutes(text)
+                          if (seconds === null) throw new Error(t('worklog.badDuration'))
+                          await saveActivity(activity, { seconds })
+                        }}
+                      />
+                    </td>
+                    <td style={recordCell}>
+                      <EditCell
+                        label={t('worklog.comment')}
+                        text={activity.summary}
+                        value={activity.summary}
+                        disabled={busy || !activity.editable}
+                        onCommit={async text => {
+                          const trimmed = text.trim()
+                          if (trimmed === '') throw new Error(t('worklog.badComment'))
+                          await saveActivity(activity, { comment: trimmed })
+                        }}
+                      />
+                      {activity.coveredBy !== null && (
+                        <div style={{ color: FG_FAINT, fontSize: 11, marginTop: 1 }}>
+                          {t('worklog.lockedBy', { id: activity.coveredBy })}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ ...recordCell, width: 90, textAlign: 'right', whiteSpace: 'nowrap', color: FG_FAINT }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+                        <span>{activity.turn !== null ? `turn ${activity.turn}` : ''}</span>
+                        {activity.editable && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy}
+                            title={t('worklog.removeRecord')}
+                            onClick={() => { void removeActivity(activity) }}
+                          >
+                            ×
+                          </Button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          )}
-
-          {/* Draft */}
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}>
-            <span style={{ color: FG_MUTED, fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-              {t('worklog.draft')}
-            </span>
-            {state?.generatedAt != null && (
-              <span style={{ color: FG_FAINT, fontSize: 12 }}>{t('worklog.generatedAt')} {fmtInstant(state.generatedAt)}</span>
-            )}
-          </div>
-
-          {(state?.draft ?? []).length === 0 ? (
-            <div style={{ padding: '6px 0', color: FG_MUTED, fontSize: 13 }}>{t('worklog.noDraft')}</div>
-          ) : (
-            <>
-              <table style={tableStyle}>
-                <thead>
-                  <tr>
-                    <th style={{ ...thStyle, width: 28 }} aria-label={t('worklog.select')} />
-                    <th style={thStyle}>{t('worklog.when')}</th>
-                    <th style={thStyle}>{t('worklog.duration')}</th>
-                    <th style={thStyle}>{t('worklog.comment')}</th>
-                    <th style={thStyle}>{t('worklog.state')}</th>
-                    <th style={{ ...thStyle, width: 60 }} />
-                  </tr>
-                </thead>
-                <tbody>
-                  {(state?.draft ?? []).map(entry => {
-                    const synced = entry.state === 'synced'
-                    return (
-                      <tr key={entry.id}>
-                        <td style={tdStyle}>
-                          <input
-                            type="checkbox"
-                            checked={selected.has(entry.id)}
-                            disabled={synced || busy}
-                            onChange={() => toggle(entry.id)}
-                            aria-label={t('worklog.selectEntry', { id: entry.id })}
-                          />
-                        </td>
-                        <td style={{ ...tdStyle, color: FG_MUTED, whiteSpace: 'nowrap' }}>{fmtInstant(entry.startedAt)}</td>
-                        <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>{fmtSeconds(entry.seconds)}</td>
-                        <td style={tdStyle}>
-                          {entry.comment}
-                          {entry.error !== null && (
-                            <div style={{ color: ERROR, fontSize: 12, marginTop: 2 }}>{entry.error}</div>
-                          )}
-                        </td>
-                        <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-                          <StateBadge t={t} state={entry.state} jiraId={entry.jiraId} />
-                        </td>
-                        <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-                          {!synced && (
-                            <button
-                              type="button"
-                              disabled={busy}
-                              style={{ ...ghostButtonStyle, padding: '2px 8px' }}
-                              onClick={() => setEditing(entry)}
-                            >
-                              {t('worklog.edit')}
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
-                <button
-                  type="button"
-                  disabled={busy || pending.length === 0}
-                  style={{ ...primaryButtonStyle, opacity: busy || pending.length === 0 ? 0.5 : 1 }}
-                  onClick={() => { void upload([...selected]) }}
-                >
-                  {t('worklog.uploadSelected', { count: selected.size })}
-                </button>
-                <button
-                  type="button"
-                  disabled={busy || pending.length === 0}
-                  style={ghostButtonStyle}
-                  onClick={() => setSelected(new Set(pending.map(entry => entry.id)))}
-                >
-                  {t('worklog.selectAll')}
-                </button>
-                <button
-                  type="button"
-                  disabled={busy || selected.size === 0}
-                  style={ghostButtonStyle}
-                  onClick={() => setSelected(new Set())}
-                >
-                  {t('worklog.clearSelection')}
-                </button>
-              </div>
-            </>
-          )}
-
-          {editing !== null && (
-            <EditDialog
-              entry={editing}
-              t={t}
-              busy={busy}
-              onCancel={() => setEditing(null)}
-              onSave={(seconds, comment) => { void saveEdit(editing, seconds, comment) }}
-            />
-          )}
+          </DisclosureRow>
         </>
       )}
 
       {notice !== null && (
-        <div style={{ marginTop: 10, color: notice.tone === 'ok' ? SUCCESS : ERROR, fontSize: 13 }}>
+        <div
+          role="status"
+          style={{
+            marginTop: 12,
+            fontSize: 12,
+            color: notice.tone === 'ok' ? 'var(--dsw-alias-label-success, #36b37e)' : 'var(--dsw-alias-label-danger, #de350b)',
+          }}
+        >
           {notice.text}
         </div>
       )}
 
-      <div style={{ marginTop: 14, paddingTop: 10, borderTop: `1px solid ${BORDER_SOFT}`, color: FG_FAINT, fontSize: 12 }}>
+      <div style={{ marginTop: 16, paddingTop: 12, borderTop: `1px solid ${BORDER_SOFT}`, color: FG_FAINT, fontSize: 12, lineHeight: '18px' }}>
         {t('worklog.hint')}
       </div>
     </div>
   )
 }
 
-function StateBadge({
-  t,
-  state,
-  jiraId,
-}: {
-  t: WorklogPanelProps['t']
-  state: DraftEntryView['state']
-  jiraId: string | null
-}): React.ReactElement {
-  const color = state === 'synced' ? SUCCESS : state === 'failed' ? ERROR : FG_MUTED
-  const label = state === 'synced'
-    ? `${t('worklog.synced')}${jiraId !== null ? ` #${jiraId}` : ''}`
-    : state === 'failed'
-      ? t('worklog.failed')
-      : t('worklog.pending')
-  return <span style={{ color, fontSize: 12 }}>{label}</span>
+const headCell: React.CSSProperties = {
+  textAlign: 'left',
+  padding: '8px 10px',
+  fontSize: 12,
+  fontWeight: 600,
+  color: FG_MUTED,
+  borderBottom: `1px solid ${BORDER_SOFT}`,
+  whiteSpace: 'nowrap',
 }
 
-function EditDialog({
-  entry,
-  t,
-  busy,
-  onCancel,
-  onSave,
-}: {
-  entry: DraftEntryView
-  t: WorklogPanelProps['t']
-  busy: boolean
-  onCancel: () => void
-  onSave: (seconds: number, comment: string) => void
-}): React.ReactElement {
-  const [minutes, setMinutes] = React.useState(String(Math.max(1, Math.round(entry.seconds / 60))))
-  const [comment, setComment] = React.useState(entry.comment)
-  const parsed = Number(minutes)
-  const valid = Number.isFinite(parsed) && parsed > 0
+const bodyCell: React.CSSProperties = {
+  padding: '8px 10px',
+  verticalAlign: 'middle',
+  borderBottom: `1px solid ${BORDER_SOFT}`,
+}
 
-  return (
-    <div
-      role="dialog"
-      aria-label={t('worklog.editTitle')}
-      style={{
-        marginTop: 12,
-        padding: 12,
-        border: `1px solid ${BORDER}`,
-        borderRadius: 6,
-        background: INPUT_BG,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 8,
-      }}
-    >
-      <div style={{ fontWeight: 600, fontSize: 13 }}>{t('worklog.editTitle')} — {entry.id}</div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-        {t('worklog.minutes')}
-        <input
-          value={minutes}
-          onChange={event => setMinutes(event.target.value)}
-          inputMode="numeric"
-          style={{ ...inputStyle, width: 90 }}
-          disabled={busy}
-        />
-      </label>
-      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-        {t('worklog.comment')}
-        <input
-          value={comment}
-          onChange={event => setComment(event.target.value)}
-          style={inputStyle}
-          disabled={busy}
-        />
-      </label>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button
-          type="button"
-          disabled={busy || !valid}
-          style={{ ...primaryButtonStyle, opacity: busy || !valid ? 0.5 : 1 }}
-          onClick={() => onSave(Math.round(parsed * 60), comment)}
-        >
-          {t('worklog.save')}
-        </button>
-        <button type="button" disabled={busy} style={ghostButtonStyle} onClick={onCancel}>
-          {t('worklog.cancel')}
-        </button>
-      </div>
-    </div>
-  )
+const recordCell: React.CSSProperties = {
+  padding: '4px 8px',
+  verticalAlign: 'middle',
 }

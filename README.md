@@ -3,7 +3,9 @@
 DSH plugin: a Jira integration for the session you are working in.
 
 - **Conversation view** (the tab next to Trajectory), three sub-tabs:
-  **本次 Worklog** / **Worklog 周报** / **Issue 详情**
+  **本次 Worklog** / **Worklog 周报** / **Issue 详情**. The worklog tab shows the bound ticket,
+  the entries with their times, and the agent's raw records; every time, duration and note is
+  editable in place, and a synced row's edit is pushed to Jira first.
 - **Configuration card** (`插件 → 已安装插件 → @ian/sc-jira`): server / login / API token /
   display name / proxy
 - **Tools** (9): 3 reads, and the 6 that run the worklog flow
@@ -152,7 +154,8 @@ pnpm run typecheck        # host + client
 | `/api/scjira/list-worklog-week` | GET | Weekly report |
 | `/api/scjira/issue` | GET | One issue with comments |
 | `/api/scjira/worklog?sessionId=` | GET | The session's worklog document + totals |
-| `/api/scjira/worklog/edit` | POST | Edit a draft entry |
+| `/api/scjira/worklog/edit` | POST | Edit a draft entry (a synced one is pushed to Jira first) |
+| `/api/scjira/worklog/activity` | POST | Edit or delete one raw record (`delete: true` to remove) |
 | `/api/scjira/worklog/upload` | POST | Upload selected entries |
 | `/api/scjira/worklog/discard` | POST | Discard drafts (synced entries stay) |
 

@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   handleBind,
+  handleDeleteActivity,
   handleDiscardWorklog,
+  handleEditActivity,
   handleEditDraft,
   handleGenerateWorklog,
   handleRecordActivity,
@@ -21,8 +23,9 @@ let dir: string
 const SESSION = 'session-test'
 
 /** A Jira that records what it was asked to do. */
-function makeJira(over: Partial<WorklogJira> & { addWorklogResult?: any } = {}) {
+function makeJira(over: Partial<WorklogJira> & { addWorklogResult?: any; updateWorklogResult?: any } = {}) {
   const calls: Array<{ key: string; opts: any }> = []
+  const updates: Array<{ key: string; id: string; opts: any }> = []
   const jira: WorklogJira = {
     issue: over.issue ?? (async (key: string) => ({
       ok: true as const,
@@ -32,8 +35,12 @@ function makeJira(over: Partial<WorklogJira> & { addWorklogResult?: any } = {}) 
       calls.push({ key, opts })
       return over.addWorklogResult ?? { ok: true as const, body: { id: `jira-${calls.length}` } }
     }),
+    updateWorklog: over.updateWorklog ?? (async (key: string, id: string, opts: any) => {
+      updates.push({ key, id, opts })
+      return over.updateWorklogResult ?? { ok: true as const, body: { id } }
+    }),
   }
-  return { jira, calls }
+  return { jira, calls, updates }
 }
 
 function deps(jira: WorklogJira): WorklogDeps {
@@ -326,6 +333,67 @@ describe('generate and upload', () => {
   })
 })
 
+describe('raw record edits', () => {
+  it('corrects an uncovered record', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'wrong', seconds: 600, startedAt: '2026-11-04T09:00:00.000+0800' })
+    const r = await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', summary: 'right', seconds: 900, startedAt: '2026-11-04T08:30:00.000+0800' })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.activity).toMatchObject({ summary: 'right', seconds: 900, startedAt: '2026-11-04T08:30:00.000+0800' })
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.activities[0]).toMatchObject({ editable: true, coveredBy: null })
+  })
+
+  it('refuses once an entry covers the record, and points at the entry', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600 })
+    await handleGenerateWorklog(d, { sessionId: SESSION, entries: null })
+    const r = await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', seconds: 900 })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.error).toContain('wl-01')
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.activities[0]).toMatchObject({ editable: false, coveredBy: 'wl-01' })
+  })
+
+  it('deletes an uncovered record and keeps a covered one', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600, startedAt: '2026-11-04T09:00:00.000+0800' })
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'b', seconds: 900, startedAt: '2026-11-04T10:00:00.000+0800' })
+    const merged = await handleGenerateWorklog(d, {
+      sessionId: SESSION,
+      entries: [{ seconds: 600, comment: 'only a', activityIds: ['act-01'] }],
+    })
+    // The proposal leaves act-02 unbilled, so it is refused: generate covers
+    // everything before anything is considered deletable.
+    expect(merged.ok).toBe(false)
+
+    const del = await handleDeleteActivity(d, { sessionId: SESSION, id: 'act-02' })
+    expect(del.ok).toBe(true)
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.activities.map(item => item.id)).toEqual(['act-01'])
+  })
+
+  it('refuses to delete a record a draft already counts', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600 })
+    await handleGenerateWorklog(d, { sessionId: SESSION, entries: null })
+    const r = await handleDeleteActivity(d, { sessionId: SESSION, id: 'act-01' })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.error).toContain('草稿')
+  })
+
+  it('rejects an invalid duration or an empty summary', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600 })
+    expect((await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', seconds: 0 })).ok).toBe(false)
+    expect((await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', summary: '  ' })).ok).toBe(false)
+    expect((await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', startedAt: '2026-11-04T09:00:00' })).ok).toBe(false)
+  })
+})
+
 describe('panel-side edits', () => {
   it('edits a draft entry', async () => {
     const d = await bound()
@@ -338,15 +406,37 @@ describe('panel-side edits', () => {
     expect(r.entry.comment).toBe('rewritten')
   })
 
-  it('refuses to edit something already on Jira', async () => {
-    const d = await bound()
+  it('pushes an edit of a synced entry to Jira, then applies it', async () => {
+    const { jira, updates } = makeJira()
+    const d = deps(jira)
+    await handleBind(d, { sessionId: SESSION, taskKey: 'DZ300-797' })
     await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600 })
     await handleGenerateWorklog(d, { sessionId: SESSION, entries: null })
     await handleUploadWorklog(d, { sessionId: SESSION, ids: ['wl-01'] })
-    const r = await handleEditDraft(d, { sessionId: SESSION, id: 'wl-01', seconds: 1200 })
+
+    const r = await handleEditDraft(d, { sessionId: SESSION, id: 'wl-01', seconds: 1800, comment: 'rewritten' })
+    expect(r.ok).toBe(true)
+    expect(updates).toHaveLength(1)
+    expect(updates[0]).toMatchObject({ key: 'DZ300-797', id: 'jira-1', opts: { seconds: 1800, comment: 'rewritten' } })
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.draft[0]?.seconds).toBe(1800)
+    expect(state.draft[0]?.comment).toBe('rewritten')
+  })
+
+  it('leaves the local entry alone when Jira rejects the edit', async () => {
+    const { jira } = makeJira({ updateWorklog: async () => ({ ok: false as const, error: 'http' as const, detail: 'nope' }) })
+    const d = deps(jira)
+    await handleBind(d, { sessionId: SESSION, taskKey: 'DZ300-797' })
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600 })
+    await handleGenerateWorklog(d, { sessionId: SESSION, entries: null })
+    await handleUploadWorklog(d, { sessionId: SESSION, ids: ['wl-01'] })
+
+    const r = await handleEditDraft(d, { sessionId: SESSION, id: 'wl-01', seconds: 1800 })
     expect(r.ok).toBe(false)
     if (r.ok) return
-    expect(r.error).toContain('Jira')
+    expect(r.error).toContain('本地未改动')
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.draft[0]?.seconds).toBe(600)
   })
 
   it('discards the drafts and keeps the synced entries', async () => {

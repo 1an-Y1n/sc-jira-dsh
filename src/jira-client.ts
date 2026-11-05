@@ -276,6 +276,49 @@ export class JiraClient {
     return this.tryParse<RawWorklog>(body)
   }
 
+  /**
+   * Update one worklog entry.
+   *
+   * Used when the reader edits a duration, a start time or a note that is
+   * already on the tracker: the edit is pushed first and applied locally only
+   * if Jira accepted it, so the panel never shows a value the tracker does not
+   * have.
+   *
+   * @param key - issue key.
+   * @param worklogId - the Jira worklog id.
+   * @param opts.seconds - new duration in seconds; omit to keep the current one.
+   * @param opts.comment - new comment; omit to keep the current one.
+   * @param opts.started - new start timestamp; omit to keep the current one.
+   * @returns the updated worklog, or the failure kind.
+   */
+  async updateWorklog(
+    key: string,
+    worklogId: string,
+    opts: { seconds?: number; comment?: string; started?: string; signal?: AbortSignal },
+  ): Promise<JiraResult<RawWorklog>> {
+    if (!KEY_RE.test(key)) {
+      return { ok: false, error: 'http', detail: 'invalid key format' }
+    }
+    if (!/^\d+$/.test(worklogId)) {
+      return { ok: false, error: 'http', detail: 'invalid worklog id' }
+    }
+    const payload: Record<string, unknown> = {}
+    if (opts.seconds !== undefined) payload.timeSpent = formatDuration(opts.seconds)
+    if (opts.comment !== undefined) payload.comment = opts.comment
+    if (opts.started !== undefined && opts.started !== '') payload.started = opts.started
+    if (Object.keys(payload).length === 0) {
+      return { ok: false, error: 'http', detail: 'nothing to update' }
+    }
+    const { status, body } = await this.curl(
+      apiUrl(this.creds.server, `/issue/${key}/worklog/${worklogId}`),
+      opts.signal,
+      { method: 'PUT', body: payload },
+    )
+    const bad = this.classify(status, body)
+    if (bad) return bad
+    return this.tryParse<RawWorklog>(body)
+  }
+
   async search(opts: {
     jql: string
     maxResults?: number

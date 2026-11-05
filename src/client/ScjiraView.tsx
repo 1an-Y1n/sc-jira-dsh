@@ -9,6 +9,7 @@
  * the session to name whose worklog document it reads.
  */
 import * as React from 'react'
+import { SegmentedTabs } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DayTotal } from '../types.js'
 import { addDays, mondayOf, todayIso } from '../timezone.js'
 import {
@@ -559,32 +560,31 @@ export function ScjiraView({ t, sessionId }: ScjiraViewProps): React.ReactElemen
   const [tab, setTab] = React.useState<SubTab>('session')
   const rt = React.useMemo(getRuntime, [])
 
+  // The tab list comes from the harness's segmented control, so the three
+  // views sit in the same control as every other panel in the shell.
+  const tabs = [
+    { value: 'session' as const, label: t('view.session'), id: 'scjira-tab-session', panelId: 'scjira-panel-session' },
+    { value: 'week' as const, label: t('view.week'), id: 'scjira-tab-week', panelId: 'scjira-panel-week' },
+    { value: 'issue' as const, label: t('view.issue'), id: 'scjira-tab-issue', panelId: 'scjira-panel-issue' },
+  ] as const
+
   return (
     <div style={cardStyle}>
-      <div style={tabBarStyle}>
-        <button type="button" style={tabBtn(tab === 'session')} onClick={() => setTab('session')}>
-          {t('view.session')}
-        </button>
-        <button type="button" style={tabBtn(tab === 'week')} onClick={() => setTab('week')}>
-          {t('view.week')}
-        </button>
-        <button type="button" style={tabBtn(tab === 'issue')} onClick={() => setTab('issue')}>
-          {t('view.issue')}
-        </button>
+      <div style={{ paddingBottom: 10 }}>
+        <SegmentedTabs items={tabs} value={tab} onChange={setTab} label={t('view.label')} />
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-        {/* All three panels stay mounted across tab switches (display:none for
-            the inactive one). Without this, every switch unmounts + remounts
-            the panel: the week fetch would flash "加载中…" and a typed issue
-            key would be thrown away. The worklog panel polls, so an unmount
-            would also stop it noticing what the agent just recorded. */}
-        <div style={{ display: tab === 'session' ? 'block' : 'none' }}>
+        {/* All three panels stay mounted across tab switches (hidden, not
+            unmounted): the week fetch would flash "加载中…" again, a typed
+            issue key would be lost, and the worklog panel would stop noticing
+            what the agent just recorded. */}
+        <div role="tabpanel" id={tabs[0].panelId} aria-labelledby={tabs[0].id} hidden={tab !== 'session'}>
           <WorklogPanel sessionId={sessionId} t={t} fetchJson={rt.fetchJson} />
         </div>
-        <div style={{ display: tab === 'week' ? 'block' : 'none' }}>
+        <div role="tabpanel" id={tabs[1].panelId} aria-labelledby={tabs[1].id} hidden={tab !== 'week'}>
           <WorklogWeekPanel t={t} fetchJson={rt.fetchJson} />
         </div>
-        <div style={{ display: tab === 'issue' ? 'block' : 'none' }}>
+        <div role="tabpanel" id={tabs[2].panelId} aria-labelledby={tabs[2].id} hidden={tab !== 'issue'}>
           <IssuePanel t={t} fetchJson={rt.fetchJson} />
         </div>
       </div>
