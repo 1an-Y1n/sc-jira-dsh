@@ -114,6 +114,8 @@ export interface DraftEntry {
   syncedAt: string | null
   /** Failure detail while `state` is `failed`. */
   error: string | null
+  /** True when the host made this entry from a finished turn, not from a request. */
+  auto?: boolean
 }
 
 /** The issue a session is bound to. */
@@ -161,12 +163,22 @@ export interface WorklogPolicy {
   rounding: number
   /** One activity may not claim more than this, however long the gap. */
   maxSecondsPerActivity: number
+  /**
+   * Make a worklog entry for every finished turn, without being asked.
+   *
+   * The host has the turn's measured time and the agent has already written
+   * down what it did; turning those two into one Jira-shaped line needs no
+   * model and no conversation, so it can happen while the turn ends rather
+   * than at the end of the session, when the context may be gone.
+   */
+  autoGenerate: boolean
 }
 
 export const DEFAULT_WORKLOG_POLICY: WorklogPolicy = {
   minSeconds: 60,
   rounding: 60,
   maxSecondsPerActivity: 14400,
+  autoGenerate: true,
 }
 
 export const KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/

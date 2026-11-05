@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import {
   handleBind,
   handleDeleteActivity,
+  handleDeleteDraftEntry,
+  handleTurnFinished,
   handleDiscardWorklog,
   handleEditActivity,
   handleEditDraft,
@@ -391,6 +393,184 @@ describe('raw record edits', () => {
     expect((await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', seconds: 0 })).ok).toBe(false)
     expect((await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', summary: '  ' })).ok).toBe(false)
     expect((await handleEditActivity(d, { sessionId: SESSION, id: 'act-01', startedAt: '2026-11-04T09:00:00' })).ok).toBe(false)
+  })
+})
+
+describe('the end of a turn', () => {
+  it('measures the turn and makes one line out of what the agent recorded', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '读寄存器转储', seconds: 600, turn: 3 })
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '定位 balloon.c', seconds: 900, turn: 3 })
+
+    const r = await handleTurnFinished(d, {
+      sessionId: SESSION,
+      turn: 3,
+      startedAt: '2026-11-05T09:00:00.000+0800',
+      endedAt: '2026-11-05T10:00:00.000+0800',
+      seconds: 3600,
+    })
+    expect(r.measured).toBe(true)
+    expect(r.entry).not.toBeNull()
+    // The line carries the turn's measured time, and the agent's own words.
+    expect(r.entry?.seconds).toBe(3600)
+    expect(r.entry?.comment).toBe('读寄存器转储；定位 balloon.c')
+    expect(r.entry?.activityIds).toEqual(['act-01', 'act-02'])
+    expect(r.entry?.auto).toBe(true)
+
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.draft).toHaveLength(1)
+    expect(state.turns).toEqual([
+      { turn: 3, startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T10:00:00.000+0800', seconds: 3600 },
+    ])
+    // Nothing is left unaccounted for: the records are inside the line.
+    expect(state.unrecordedCount).toBe(0)
+  })
+
+  it('measures a turn that recorded nothing, but makes no line for it', async () => {
+    const d = await bound()
+    const r = await handleTurnFinished(d, {
+      sessionId: SESSION,
+      turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800',
+      endedAt: '2026-11-05T09:30:00.000+0800',
+      seconds: 1800,
+    })
+    expect(r.measured).toBe(true)
+    expect(r.entry).toBeNull()
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.turns).toHaveLength(1)
+    expect(state.draft).toHaveLength(0)
+  })
+
+  it('makes no line for a turn shorter than the policy floor', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '回了一句', seconds: 60, turn: 2 })
+    const r = await handleTurnFinished(d, {
+      sessionId: SESSION,
+      turn: 2,
+      startedAt: '2026-11-05T09:00:00.000+0800',
+      endedAt: '2026-11-05T09:00:20.000+0800',
+      seconds: 20,
+    })
+    expect(r.entry).toBeNull()
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    // The turn is still measured; only the line is missing.
+    expect(state.turns).toHaveLength(1)
+    expect(state.unrecordedCount).toBe(1)
+  })
+
+  it('keeps the earlier line when the next turn adds one', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '第一段', seconds: 600, turn: 1 })
+    await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T09:10:00.000+0800', seconds: 600,
+    })
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '第二段', seconds: 900, turn: 2 })
+    await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 2,
+      startedAt: '2026-11-05T09:20:00.000+0800', endedAt: '2026-11-05T09:35:00.000+0800', seconds: 900,
+    })
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.draft.map(entry => entry.comment)).toEqual(['第一段', '第二段'])
+    expect(state.draft.map(entry => entry.id)).toEqual(['wl-01', 'wl-02'])
+    expect(state.draft.every(entry => entry.auto === true)).toBe(true)
+  })
+
+  it('measures a turn once, however often the stop signal repeats', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '一段', seconds: 600, turn: 1 })
+    const first = await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T09:10:00.000+0800', seconds: 600,
+    })
+    const second = await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T09:10:00.000+0800', seconds: 600,
+    })
+    expect(first.measured).toBe(true)
+    expect(second.measured).toBe(false)
+    expect(second.entry).toBeNull()
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.turns).toHaveLength(1)
+    expect(state.draft).toHaveLength(1)
+  })
+
+  it('measures nothing for an unbound session', async () => {
+    const d = deps(makeJira().jira)
+    const r = await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T09:10:00.000+0800', seconds: 600,
+    })
+    expect(r.measured).toBe(false)
+    expect(r.entry).toBeNull()
+  })
+
+  it('makes no line when the policy turns the automatic line off', async () => {
+    const { jira } = makeJira()
+    const d = { ...deps(jira), policy: { ...deps(jira).policy, autoGenerate: false } }
+    await handleBind(d, { sessionId: SESSION, taskKey: 'DZ300-797' })
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '一段', seconds: 600, turn: 1 })
+    const r = await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T09:10:00.000+0800', seconds: 600,
+    })
+    expect(r.measured).toBe(true)
+    expect(r.entry).toBeNull()
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.turns).toHaveLength(1)
+    expect(state.draft).toHaveLength(0)
+  })
+
+  it('does not bill the same record twice when a turn ends again', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '一段', seconds: 600, turn: 1 })
+    await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T09:10:00.000+0800', seconds: 600,
+    })
+    // A later turn ends; the first turn's record is already inside a line.
+    await handleRecordActivity(d, { sessionId: SESSION, summary: '另一段', seconds: 300, turn: 2 })
+    await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 2,
+      startedAt: '2026-11-05T09:20:00.000+0800', endedAt: '2026-11-05T09:25:00.000+0800', seconds: 300,
+    })
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.draft).toHaveLength(2)
+    expect(state.draft[1].activityIds).toEqual(['act-02'])
+    expect(state.unrecordedCount).toBe(0)
+  })
+})
+
+describe('dropping one entry', () => {
+  it('removes a draft entry and keeps the others', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600, turn: 1 })
+    await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 1,
+      startedAt: '2026-11-05T09:00:00.000+0800', endedAt: '2026-11-05T09:10:00.000+0800', seconds: 600,
+    })
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'b', seconds: 300, turn: 2 })
+    await handleTurnFinished(d, {
+      sessionId: SESSION, turn: 2,
+      startedAt: '2026-11-05T09:20:00.000+0800', endedAt: '2026-11-05T09:25:00.000+0800', seconds: 300,
+    })
+
+    const r = await handleDeleteDraftEntry(d, { sessionId: SESSION, id: 'wl-01' })
+    expect(r.ok).toBe(true)
+    const state = await handleWorklogState(d, { sessionId: SESSION })
+    expect(state.draft.map(entry => entry.id)).toEqual(['wl-02'])
+  })
+
+  it('refuses to drop an entry that already reached Jira', async () => {
+    const d = await bound()
+    await handleRecordActivity(d, { sessionId: SESSION, summary: 'a', seconds: 600 })
+    await handleGenerateWorklog(d, { sessionId: SESSION, entries: null })
+    await handleUploadWorklog(d, { sessionId: SESSION, ids: ['wl-01'] })
+    const r = await handleDeleteDraftEntry(d, { sessionId: SESSION, id: 'wl-01' })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.error).toContain('Jira')
   })
 })
 

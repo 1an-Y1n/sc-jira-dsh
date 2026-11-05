@@ -2,9 +2,9 @@
  * sc-jira HOST apply. Registers:
  *   - The plugin's own settings form (credentials + the worklog policy),
  *     keyed by the profile entry id
- *   - 10 HTTP routes at /api/scjira/*: five reads (status, config, issue,
- *     list-my-open, list-worklog-week) and five worklog operations (state,
- *     edit, activity, upload, discard)
+ *   - 11 HTTP routes at /api/scjira/*: five reads (status, config, issue,
+ *     list-my-open, list-worklog-week) and six worklog operations (state,
+ *     edit, activity, delete-entry, upload, discard)
  *   - 9 tools: 3 reads and 6 worklog operations
  *   - 2 hooks: a one-line reminder before each step, the turn clock at the
  *     end of each turn
@@ -32,6 +32,8 @@ import { handleIssue, handleListMyOpen, handleListWorklogWeek } from './handlers
 import {
   handleBind,
   handleDeleteActivity,
+  handleDeleteDraftEntry,
+  handleTurnFinished,
   handleDiscardWorklog,
   handleEditActivity,
   handleEditDraft,
@@ -42,7 +44,7 @@ import {
   handleWorklogState,
   type WorklogDeps,
 } from './worklog-handlers.js'
-import { readDocCached, updateDocAndInvalidate } from './session-store.js'
+import { readDocCached } from './session-store.js'
 import { summarizeDoc } from './worklog.js'
 import { localTimestamp } from './time-policy.js'
 import { defineJiraTool } from './tool.js'
@@ -96,6 +98,7 @@ export const Config = Schema.object({
     minSeconds: Schema.number().default(DEFAULT_WORKLOG_POLICY.minSeconds),
     rounding: Schema.number().default(DEFAULT_WORKLOG_POLICY.rounding),
     maxSecondsPerActivity: Schema.number().default(DEFAULT_WORKLOG_POLICY.maxSecondsPerActivity),
+    autoGenerate: Schema.boolean().default(DEFAULT_WORKLOG_POLICY.autoGenerate),
   }).default(DEFAULT_WORKLOG_POLICY),
 })
 
@@ -142,7 +145,8 @@ function policyOf(raw: Partial<WorklogPolicy> | undefined): WorklogPolicy {
     Math.max(minSeconds, rounding),
     Math.round(raw?.maxSecondsPerActivity ?? DEFAULT_WORKLOG_POLICY.maxSecondsPerActivity),
   )
-  return { minSeconds, rounding, maxSecondsPerActivity }
+  const autoGenerate = raw?.autoGenerate ?? DEFAULT_WORKLOG_POLICY.autoGenerate
+  return { minSeconds, rounding, maxSecondsPerActivity, autoGenerate }
 }
 
 export function apply(ctx: Context, config: ScjiraConfig): void {
@@ -296,6 +300,17 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
               seconds: typeof body.seconds === 'number' ? body.seconds : undefined,
               startedAt: typeof body.startedAt === 'string' ? body.startedAt : undefined,
             })
+            json(r.ok ? 200 : 400, r)
+            return
+          }
+          if (method === 'POST' && pathname.endsWith('/worklog/delete-entry')) {
+            const body = await readBody()
+            const sessionId = String(body.sessionId ?? '')
+            if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
+            const r = await handleDeleteDraftEntry(
+              { storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server },
+              { sessionId, id: String(body.id ?? '') },
+            )
             json(r.ok ? 200 : 400, r)
             return
           }
@@ -522,7 +537,8 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
   ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_record_activity',
     description:
-      '记录一段工作：一句话说明做了什么，以及花了多久。seconds 可省略——省略时按距上次记录的时间自动测量' +
+      '记录一段工作：一句话说明做了什么，以及花了多久。这句话会直接成为 Jira 工时里的说明文字，' +
+      '所以请写成一句能单独看懂的话。seconds 可省略——省略时按距上次记录的时间自动测量' +
       `（下限 ${formatDuration(policy.minSeconds)}，单条封顶 ${formatDuration(policy.maxSecondsPerActivity)}）。`,
     parameters: {
       summary: { type: 'string', required: true, description: '一句话说明这段工作做了什么' },
@@ -590,8 +606,15 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
         properties: {
           ok: { type: 'boolean' },
           bound: { type: 'boolean' },
-          key: { type: 'string' },
-          summary: { type: 'string' },
+          // The nullable ones are nullable ON PURPOSE: an unbound session has
+          // no key, and a session with no draft has no generation time. The
+          // schema has to say so — a declared `string` that receives null
+          // fails the whole call, and the model gets an error instead of the
+          // state it asked for.
+          key: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          summary: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          statusName: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          url: { oneOf: [{ type: 'string' }, { type: 'null' }] },
           activityCount: { type: 'number' },
           recordedSeconds: { type: 'number' },
           measuredSeconds: { type: 'number' },
@@ -605,7 +628,8 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
           activities: { type: 'array' },
           draft: { type: 'array' },
           uncoveredIds: { type: 'array' },
-          generatedAt: { type: 'string' },
+          turns: { type: 'array' },
+          generatedAt: { oneOf: [{ type: 'string' }, { type: 'null' }] },
           error: { type: 'string' },
         },
         additionalProperties: true,
@@ -632,9 +656,10 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
   ctx.effect(() => tools.register(defineJiraTool({
     name: 'jira_generate_worklog',
     description:
-      '把已记录且还没上传的活动汇总成 worklog 草稿。不传 entries 时按活动逐条生成（确定性）；' +
-      '传 entries 时按给定的合并/改写生成，但每条未上传的活动必须且只能被覆盖一次，' +
-      '合计与记录的差额会在 deltaSeconds 里返回。',
+      '把已记录的活动合并成 worklog 条目。正常情况下每轮结束时会自动按本轮耗时生成条目，' +
+      '所以这个工具通常用来合并或改写：把几条记录并成一条更适合 Jira 的行。' +
+      '不传 entries 时按活动逐条生成（确定性）；传 entries 时按给定的合并/改写生成，' +
+      '但每条未上传的活动必须且只能被覆盖一次，合计与记录的差额会在 deltaSeconds 里返回。',
     parameters: {
       entries: {
         type: 'array',
@@ -765,9 +790,13 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
       `[Jira] 本 session 绑定 ${doc.binding.key}`,
       `已记录 ${formatDuration(state.recordedSeconds)} / ${state.activityCount} 条`,
     ]
-    if (state.activityCount === 0) bits.push('还没有记录工作：做完一段后调 jira_record_activity 记一条')
-    else if (state.unrecordedCount > 0) bits.push(`未生成草稿 ${state.unrecordedCount} 条`)
-    if (state.pendingCount > 0) bits.push(`未上传 ${state.pendingCount} 条`)
+    if (state.activityCount === 0) {
+      bits.push('还没有记录工作：做完一段后调 jira_record_activity 记一句，这句话会变成 Jira 工时的说明')
+    } else if (state.unrecordedCount > 0) {
+      bits.push(`还有 ${state.unrecordedCount} 条记录没计入条目`)
+    }
+    if (state.pendingCount > 0) bits.push(`待上传 ${state.pendingCount} 条`)
+    bits.push('每轮结束时会按本轮耗时自动生成一条 worklog，人来确认上传')
     const text = bits.join('；')
 
     return {
@@ -790,24 +819,18 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     const endedAt = Date.now()
     const seconds = Math.max(0, Math.round((endedAt - open.startedAt) / 1000))
     try {
-      await updateDocAndInvalidate(config.storeDir, payload.agent.id, current => {
-        if (current.binding === null) return { next: null, result: null }
-        if (current.turns.some(turn => turn.turn === payload.turn)) return { next: null, result: null }
-        return {
-          next: {
-            ...current,
-            turns: [
-              ...current.turns,
-              {
-                turn: payload.turn,
-                startedAt: localTimestamp(open.startedAt),
-                endedAt: localTimestamp(endedAt),
-                seconds,
-              },
-            ],
-          },
-          result: null,
-        }
+      // One write: the turn's measured span and the worklog line it produces
+      // land together, or not at all. The line needs no model and no
+      // conversation — the agent wrote the comment while it was still doing
+      // the work, and the duration is a clock reading — which is why this can
+      // happen at the end of every turn rather than at the end of the
+      // session, where the conversation may have been compacted away.
+      await handleTurnFinished({ storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }, {
+        sessionId: payload.agent.id,
+        turn: payload.turn,
+        startedAt: localTimestamp(open.startedAt),
+        endedAt: localTimestamp(endedAt),
+        seconds,
       })
     } catch {
       // Measurement must never disturb the agent.

@@ -10,8 +10,10 @@
  */
 import type {
   Activity,
+  Draft,
   DraftEntry,
   SessionDoc,
+  TurnSpan,
   WorklogPolicy,
 } from './types.js'
 import { KEY_RE } from './types.js'
@@ -26,10 +28,12 @@ import {
   activityEnd,
 } from './time-policy.js'
 import {
+  autoEntryForTurn,
   discardDraft,
   generateDraft,
   isSettled,
   nextActivityId,
+  nextEntryId,
   pendingEntries,
   summarizeDoc,
   unrecordedActivities,
@@ -247,6 +251,91 @@ export async function handleRecordActivity(
   })
 }
 
+// --- the end of a turn ------------------------------------------------------
+
+export interface TurnFinishedArgs {
+  sessionId: string
+  turn: number
+  /** Local timestamps, the shape the ledger stores. */
+  startedAt: string
+  endedAt: string
+  /** The measured duration of the turn, in seconds. */
+  seconds: number
+  /** Now, injectable for tests. */
+  now?: number
+}
+
+export interface TurnFinishedOutcome {
+  /** The span was written: the session is bound and the turn was new. */
+  measured: boolean
+  /** The entry the turn produced, when it produced one. */
+  entry: DraftEntry | null
+}
+
+/**
+ * Close a turn: measure it, and turn it into a worklog line.
+ *
+ * Both halves happen in ONE write, so a turn is never half-recorded: either
+ * the span and its line are both on disk, or neither is.
+ *
+ * The line needs no model and no conversation. The duration is a clock
+ * reading, and the comment was written by the agent while it was still doing
+ * the work — which is the only moment it could be written honestly. That is
+ * what makes it safe to do this at the end of every turn instead of at the end
+ * of the session, where the conversation may have been compacted away.
+ */
+export async function handleTurnFinished(
+  deps: WorklogDeps,
+  args: TurnFinishedArgs,
+): Promise<TurnFinishedOutcome> {
+  const now = args.now ?? Date.now()
+  return updateDocAndInvalidate<TurnFinishedOutcome>(deps.storeDir, args.sessionId, current => {
+    // Nothing is measured for an unbound session: there is no ticket to bill.
+    if (current.binding === null) return { next: null, result: { measured: false, entry: null } }
+    // A turn is measured once. A repeated stop signal must not bill it twice.
+    if (current.turns.some(turn => turn.turn === args.turn)) {
+      return { next: null, result: { measured: false, entry: null } }
+    }
+
+    const span: TurnSpan = {
+      turn: args.turn,
+      startedAt: args.startedAt,
+      endedAt: args.endedAt,
+      seconds: args.seconds,
+    }
+    const turns = [...current.turns, span]
+
+    const proposal = deps.policy.autoGenerate
+      ? autoEntryForTurn({ ...current, turns }, args.turn, span, deps.policy)
+      : null
+    if (proposal === null) {
+      return { next: { ...current, turns }, result: { measured: true, entry: null } }
+    }
+
+    const entries = current.draft?.entries ?? []
+    const entry: DraftEntry = {
+      id: nextEntryId(entries),
+      startedAt: proposal.startedAt ?? span.startedAt,
+      seconds: proposal.seconds,
+      comment: proposal.comment,
+      activityIds: proposal.activityIds ?? [],
+      state: 'draft',
+      jiraId: null,
+      syncedAt: null,
+      error: null,
+      auto: true,
+    }
+    const draft: Draft = {
+      generatedAt: new Date(now).toISOString(),
+      entries: [...entries, entry],
+    }
+    return {
+      next: { ...current, turns, draft },
+      result: { measured: true, entry },
+    }
+  })
+}
+
 // --- state -----------------------------------------------------------------
 
 export interface ActivityState extends Activity {
@@ -258,6 +347,8 @@ export interface ActivityState extends Activity {
 
 export interface WorklogState extends WorklogSummary {
   activities: ActivityState[]
+  /** The measured turns, oldest first. */
+  turns: TurnSpan[]
   draft: DraftEntry[]
   uncoveredIds: string[]
   generatedAt: string | null
@@ -276,6 +367,7 @@ export async function handleWorklogState(deps: WorklogDeps, args: { sessionId: s
       const coveredBy = coverOf.get(activity.id) ?? null
       return { ...activity, coveredBy, editable: coveredBy === null }
     }),
+    turns: doc.turns,
     draft: doc.draft?.entries ?? [],
     uncoveredIds: uncoveredActivities(doc).map(activity => activity.id),
     generatedAt: doc.draft?.generatedAt ?? null,
@@ -534,6 +626,34 @@ export async function handleEditActivity(
         activities: current.activities.map(item => item.id === args.id ? edited : item),
       },
       result: { ok: true as const, activity: edited },
+    }
+  })
+}
+
+/**
+ * Drop one draft entry.
+ *
+ * Only while it is still a draft: a synced entry lives on the tracker, and
+ * the way to remove that is Jira, not here. This exists because the automatic
+ * line makes one entry per turn, and a reader who disagrees with one of them
+ * should not have to discard the whole round.
+ */
+export async function handleDeleteDraftEntry(
+  deps: WorklogDeps,
+  args: { sessionId: string; id: string },
+): Promise<Result<{ removed: DraftEntry }>> {
+  return updateDocAndInvalidate<Result<{ removed: DraftEntry }>>(deps.storeDir, args.sessionId, current => {
+    if (current.draft === null) return { next: null, result: { ok: false as const, error: '还没有生成 worklog 草稿' } }
+    const entry = current.draft.entries.find(item => item.id === args.id)
+    if (entry === undefined) return { next: null, result: { ok: false as const, error: `未知条目 ${args.id}` } }
+    if (entry.state === 'synced') {
+      return { next: null, result: { ok: false as const, error: '该条已上传 Jira，本地不能删；要删请到 Jira 侧处理' } }
+    }
+    const entries = current.draft.entries.filter(item => item.id !== args.id)
+    const draft = entries.length === 0 ? null : { ...current.draft, entries }
+    return {
+      next: { ...current, draft },
+      result: { ok: true as const, removed: entry },
     }
   })
 }

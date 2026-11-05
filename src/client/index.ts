@@ -4,8 +4,10 @@
  *   - Configuration card (slot 'plugins.bundle.config', key '@ian/sc-jira')
  *     that appears on the bundle's own page under 插件 → 已安装插件
  *   - Conversation view (slot 'conversation.view', id 'sc-jira') that appears as
- *     a tab next to Trajectory, with 3 sub-tabs: 本次 Worklog / Worklog 周报 /
- *     Issue 详情
+ *     a tab next to Trajectory, with 4 sub-tabs: 本次 Worklog / 我的未完成 /
+ *     Worklog 周报 / Issue 详情
+ *   - Ticket chip (slot 'conversation.composer.dock', id 'sc-jira-ticket') in the
+ *     strip under the composer: the ticket this session is bound to
  *
  * The view names its session so the worklog panel can read that session's
  * document; the card and the view are otherwise pure renderers.
@@ -16,6 +18,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ScjiraSettingsCard } from './ScjiraSettingsCard.js'
 import { ScjiraView } from './ScjiraView.js'
+import { TicketChip } from './TicketChip.js'
 import { zh, en } from './locales.js'
 
 export const name = 'sc-jira-client'
@@ -70,7 +73,25 @@ export function apply(ctx: Context): void {
     ),
   )
 
-  // 3. Conversation view — sits next to Trajectory in the view ring
+  // 3. The bound ticket, in the strip under the composer.
+  //
+  // The strip already carries the session's turn and token counters, so it is
+  // the one place near the input box where a standing fact about this session
+  // belongs. The chip renders nothing while the session is unbound.
+  ctx.slots.inject('conversation.composer.dock', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.composer.dock',
+        id: 'sc-jira-ticket',
+        order: -1,  // before the harness's own counters
+        locale: NS,
+        inject: (sessionId: string) => ({ t: ctx.locale.bind(NS), sessionId }),
+      },
+      TicketChip as never,
+    ),
+  )
+
+  // 4. Conversation view — sits next to Trajectory in the view ring
   ctx.slots.inject('conversation.view', () =>
     ctx.slots.register(
       {

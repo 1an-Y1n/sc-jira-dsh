@@ -16,9 +16,10 @@ import type {
   Draft,
   DraftEntry,
   SessionDoc,
+  TurnSpan,
   WorklogPolicy,
 } from './types.js'
-import { explicitSeconds, instantOf, localTimestamp } from './time-policy.js'
+import { deriveSeconds, explicitSeconds, instantOf, localTimestamp } from './time-policy.js'
 
 /** Activities no synced entry accounts for. */
 export function uncoveredActivities(doc: SessionDoc): Activity[] {
@@ -243,6 +244,52 @@ export function generateDraft(
       proposedSeconds,
       deltaSeconds: proposedSeconds - recordedSeconds,
     },
+  }
+}
+
+/**
+ * The entry one finished turn contributes.
+ *
+ * A turn becomes ONE line: the host measured how long it ran, the agent wrote
+ * down what it did while it was doing it. Neither half needs a model here —
+ * the comment was written while the work was still in context, which is the
+ * only moment it could be written honestly, and the duration is a clock
+ * reading. That is why this can run at the end of every turn instead of at
+ * the end of the session, where the conversation may have been compacted away.
+ *
+ * Two turns produce nothing:
+ *
+ *   - a turn shorter than the policy floor is chatter, and a Jira line for
+ *     chatter is noise;
+ *   - a turn the agent recorded nothing in has no description, and a Jira
+ *     line without a description is a line nobody wants to read. The panel
+ *     shows the unaccounted time instead.
+ */
+export function autoEntryForTurn(
+  doc: SessionDoc,
+  turn: number,
+  span: TurnSpan,
+  policy: WorklogPolicy,
+): ProposedEntry | null {
+  // The turn's own measured time, rounded and clamped like any derived
+  // duration; null means the turn was too short to bill.
+  const seconds = deriveSeconds(span.seconds * 1000, policy)
+  if (seconds === null) return null
+
+  const covered = new Set<string>()
+  for (const entry of doc.draft?.entries ?? []) {
+    for (const id of entry.activityIds) covered.add(id)
+  }
+  const activities = doc.activities.filter(
+    activity => activity.turn === turn && !covered.has(activity.id),
+  )
+  if (activities.length === 0) return null
+
+  return {
+    seconds,
+    comment: activities.map(activity => activity.summary).join('；'),
+    startedAt: span.startedAt,
+    activityIds: activities.map(activity => activity.id),
   }
 }
 

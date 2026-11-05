@@ -38,6 +38,7 @@ import {
   headCell,
 } from './theme.js'
 import { WorklogPanel } from './WorklogPanel.js'
+import { getRuntime, type ScjiraRuntime } from './runtime.js'
 
 interface ScjiraViewProps {
   t: (key: string, params?: Record<string, string | number>) => string
@@ -102,19 +103,6 @@ interface IssueResponse {
   error?: string
 }
 
-interface ScjiraRuntime {
-  fetchJson<T>(path: string, init?: RequestInit): Promise<T>
-}
-
-const RUNTIME_KEY = '__scjiraRuntime__'
-declare global { interface Window { [RUNTIME_KEY]?: ScjiraRuntime } }
-
-// Fallback fetch if host didn't expose a runtime helper
-async function defaultFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, { credentials: 'include', ...init })
-  return (await r.json()) as T
-}
-
 // Inject once: keyframes for the "Updating…" pulse dot. Idempotent guard so
 // hot reloads / repeated mounts don't append duplicate <style> tags.
 let pulseStyleInjected = false
@@ -125,11 +113,6 @@ function injectPulseKeyframes(): void {
   el.setAttribute('data-scjira-pulse', '')
   el.textContent = '@keyframes scjira-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }'
   document.head.appendChild(el)
-}
-
-function getRuntime(): ScjiraRuntime {
-  if (typeof window !== 'undefined' && window[RUNTIME_KEY]) return window[RUNTIME_KEY]!
-  return { fetchJson: defaultFetchJson }
 }
 
 /**

@@ -51,6 +51,8 @@ export interface DraftEntryView {
   jiraId: string | null
   syncedAt: string | null
   error: string | null
+  /** True when the host made this entry from a finished turn. */
+  auto?: boolean
 }
 
 export interface WorklogStateResponse {
@@ -319,6 +321,20 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
     }
   }
 
+  async function removeEntry(entry: DraftEntryView): Promise<void> {
+    try {
+      await post('/api/scjira/worklog/delete-entry', { id: entry.id })
+      setSelected(prev => {
+        const next = new Set(prev)
+        next.delete(entry.id)
+        return next
+      })
+      setNotice({ tone: 'ok', text: t('worklog.entryRemoved') })
+    } catch {
+      // reported
+    }
+  }
+
   async function removeActivity(activity: ActivityView): Promise<void> {
     try {
       await post('/api/scjira/worklog/activity', { id: activity.id, delete: true })
@@ -469,8 +485,22 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
                         <div style={{ color: 'var(--dsw-alias-label-danger, #de350b)', fontSize: 12, marginTop: 2 }}>{entry.error}</div>
                       )}
                     </td>
-                    <td style={bodyCell}>
-                      <Tag tone={tag.tone}>{tag.label}</Tag>
+                    <td style={{ ...bodyCell, whiteSpace: 'nowrap' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <Tag tone={tag.tone}>{tag.label}</Tag>
+                        {entry.auto === true && <Tag tone="quiet">{t('worklog.auto')}</Tag>}
+                        {entry.state !== 'synced' && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy}
+                            title={t('worklog.removeEntry')}
+                            onClick={() => { void removeEntry(entry) }}
+                          >
+                            ×
+                          </Button>
+                        )}
+                      </span>
                     </td>
                   </tr>
                 )

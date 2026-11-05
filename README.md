@@ -3,7 +3,9 @@
 DSH plugin: a Jira integration for the session you are working in.
 
 - **Conversation view** (the tab next to Trajectory), four sub-tabs:
-  **本次 Worklog** / **我的未完成** / **Worklog 周报** / **Issue 详情**. The worklog tab shows the bound ticket,
+  **本次 Worklog** / **我的未完成** / **Worklog 周报** / **Issue 详情**.
+- **Ticket chip** in the strip under the composer: the ticket this session is bound to, with its
+  status. It renders nothing while the session is unbound. The worklog tab shows the bound ticket,
   the entries with their times, and the agent's raw records; every time, duration and note is
   editable in place, and a synced row's edit is pushed to Jira first.
 - **Configuration card** (`插件 → 已安装插件 → @ian/sc-jira`): server / login / API token /
@@ -25,23 +27,27 @@ a worklog on the tracker:
    ├─ agent records as it goes ← jira_record_activity("定位 panic 到 local_irq_enable", 1800)
    │                             (seconds may be omitted: the host measures since the last record)
    │
-   ├─ "生成 worklog"            ← agent calls jira_generate_worklog
-   │                             → a draft: duration + comment + started time, per entry
+   ├─ the turn ends            ← the host turns that turn into ONE worklog line:
+   │                             duration = the turn's measured time, comment = the agent's words
    │
    └─ panel: tick → upload      ← jira_upload_worklog({ ids }) or the 本次 Worklog panel
 ```
 
 The division of labour is the point:
 
-- **The host measures.** Every turn's span is recorded (`agent/turn-stopping`). It never becomes a
-  worklog entry by itself; it gives an omitted duration its value, and it tells the reader how much
-  measured time the records do not account for (the **gap**).
-- **The agent explains.** Only the agent knows what it was doing, so it writes the activity records
-  and groups them into a draft. It can also record a duration it measured itself, which is kept as
-  given.
-- **The human decides.** Generating and uploading are separate steps. Nothing reaches Jira until a
-  person selects entries and uploads them; a synced entry is final, and a rejected upload stays
-  retryable.
+- **The agent explains, while it works.** Only the agent knows what it was doing, so it writes the
+  activity records — and that one sentence becomes the Jira worklog comment. Nothing has to be
+  summarized afterwards, which is why the session can be compacted without losing the worklog.
+- **The host measures.** Every turn's span is recorded (`agent/turn-stopping`), and when a turn ends
+  the host turns it into one draft entry: the measured duration, the agent's sentences, the records
+  it covers. No model, no conversation, no tokens — a clock reading and a string the agent already
+  wrote. A turn shorter than the policy floor, or one the agent recorded nothing in, produces no
+  entry: chatter is not work.
+- **The human decides.** Nothing reaches Jira until a person selects entries and uploads them; a
+  synced entry is final, and a rejected upload stays retryable.
+
+The agent can still group or reword the records itself with `jira_generate_worklog` — while it still
+has the context. That is the tool's job now, not the automatic line's.
 
 The design this implements is **[docs/design/v4-worklog-redesign.md](docs/design/v4-worklog-redesign.md)**.
 Historical designs are kept in `docs/design/v3-session-binding.md` and `docs/specs/`.
@@ -74,11 +80,21 @@ records that never reached Jira.
 | `jira_unbind` | End the binding, once everything is uploaded |
 | `jira_record_activity {summary, seconds?, startedAt?}` | Record one piece of work |
 | `jira_worklog_state` | Binding, activities, measured vs recorded, gap, draft |
-| `jira_generate_worklog {entries?}` | Turn unbilled activities into a draft |
+| `jira_generate_worklog {entries?}` | Group or reword unbilled activities into a draft |
 | `jira_upload_worklog {ids}` | Upload the selected entries (empty selection = show what is pending) |
 | `jira_list_my_open` | Unresolved issues assigned to me |
 | `jira_list_worklog_week {startDate?}` | One week of my Jira worklogs |
 | `jira_issue {key}` | One issue with its description and comments |
+
+The automatic line is on by default (`worklog.autoGenerate`); the policy that shapes it lives in the
+plugin config:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `worklog.autoGenerate` | `true` | Make one worklog line for every finished turn |
+| `worklog.minSeconds` | `60` | A turn shorter than this is chatter and produces no line |
+| `worklog.rounding` | `60` | Durations round UP to a multiple of this |
+| `worklog.maxSecondsPerActivity` | `14400` | One line may not claim more than this |
 
 `jira_generate_worklog` without arguments is deterministic: one draft entry per activity, verbatim.
 With `entries` the agent may merge or reword — but every unbilled activity must be covered exactly
@@ -137,6 +153,7 @@ dsh plugin --profile web remove @ian/sc-jira
 | `worklog.minSeconds` | A measured interval shorter than this is refused (default 60) |
 | `worklog.rounding` | Measured durations round **up** to this step (default 60) |
 | `worklog.maxSecondsPerActivity` | Per-activity cap (default 4h) |
+| `worklog.autoGenerate` | Make one worklog line for every finished turn (default on) |
 
 ## Tests
 
@@ -157,6 +174,7 @@ pnpm run typecheck        # host + client
 | `/api/scjira/worklog?sessionId=` | GET | The session's worklog document + totals |
 | `/api/scjira/worklog/edit` | POST | Edit a draft entry (a synced one is pushed to Jira first) |
 | `/api/scjira/worklog/activity` | POST | Edit or delete one raw record (`delete: true` to remove) |
+| `/api/scjira/worklog/delete-entry` | POST | Drop one draft entry (a synced one stays) |
 | `/api/scjira/worklog/upload` | POST | Upload selected entries |
 | `/api/scjira/worklog/discard` | POST | Discard drafts (synced entries stay) |
 

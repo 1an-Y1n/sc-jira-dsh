@@ -138,6 +138,29 @@ describe('the registered tools', () => {
     }
   })
 
+  it('returns a state the schema accepts, bound or not', async () => {
+    // The state read is the one the agent asks for most, and it has the most
+    // nullable fields: an unbound session has no key, and a session with no
+    // draft has no generation time. A schema that says `string` where the
+    // value is null fails the WHOLE call — the model gets an error instead of
+    // the state, and never learns what is missing.
+    const { ctx, tools } = makeContext()
+    const { apply } = await import('../src/index.js')
+    apply(ctx, makeConfig())
+
+    const tool = tools.get('jira_worklog_state')
+    const exec = { agent: { id: 'session-unbound' }, sessionId: 'session-unbound' } as any
+
+    const unbound = await tool.execute({}, exec)
+    expect(validateJsonSchemaValue((tool.output.schema as any), unbound, 'value')).toEqual([])
+    expect(unbound.bound).toBe(false)
+    expect(unbound.key).toBeNull()
+    expect(unbound.generatedAt).toBeNull()
+
+    const bound = await tool.execute({}, { ...exec, agent: { id: 'session-bound' } })
+    expect(validateJsonSchemaValue((tool.output.schema as any), bound, 'value')).toEqual([])
+  })
+
   it('refuse to call Jira without credentials instead of returning a broken value', async () => {
     const { ctx, tools } = makeContext()
     const { apply } = await import('../src/index.js')
