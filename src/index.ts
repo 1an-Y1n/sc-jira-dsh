@@ -761,7 +761,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
       `已记录 ${formatDuration(state.recordedSeconds)} / ${state.activityCount} 条`,
     ]
     if (state.activityCount === 0) bits.push('还没有记录工作：做完一段后调 jira_record_activity 记一条')
-    else if (state.uncoveredCount > 0) bits.push(`未生成草稿 ${state.uncoveredCount} 条`)
+    else if (state.unrecordedCount > 0) bits.push(`未生成草稿 ${state.unrecordedCount} 条`)
     if (state.pendingCount > 0) bits.push(`未上传 ${state.pendingCount} 条`)
     const text = bits.join('；')
 

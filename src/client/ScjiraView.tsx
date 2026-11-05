@@ -570,7 +570,10 @@ export function ScjiraView({ t, sessionId }: ScjiraViewProps): React.ReactElemen
 
   return (
     <div style={cardStyle}>
-      <div style={{ paddingBottom: 10 }}>
+      {/* Equal-width segments are meant for a bounded row, not the full
+          width of a conversation panel: cap it so the three labels read as a
+          tab control rather than three large cells. */}
+      <div style={{ paddingBottom: 12, maxWidth: 420 }}>
         <SegmentedTabs items={tabs} value={tab} onChange={setTab} label={t('view.label')} />
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>

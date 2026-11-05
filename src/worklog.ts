@@ -124,6 +124,7 @@ export function generateDraft(
   now: number,
 ): GenerateResult {
   const uncovered = uncoveredActivities(doc)
+  const unrecorded = unrecordedActivities(doc)
   const synced = (doc.draft?.entries ?? []).filter(entry => entry.state === 'synced')
 
   if (uncovered.length === 0 && (proposal === null || proposal.length === 0)) {
@@ -258,6 +259,8 @@ export interface WorklogSummary {
   /** Measured minus recorded; what the records do not account for. */
   gapSeconds: number
   uncoveredCount: number
+  /** Records no entry covers at all (a draft that covers them does not count). */
+  unrecordedCount: number
   draftCount: number
   pendingCount: number
   syncedCount: number
@@ -271,6 +274,7 @@ export function summarizeDoc(doc: SessionDoc): WorklogSummary {
   const measuredSeconds = doc.turns.reduce((sum, turn) => sum + turn.seconds, 0)
   const entries = doc.draft?.entries ?? []
   const uncovered = uncoveredActivities(doc)
+  const unrecorded = unrecordedActivities(doc)
   return {
     bound: doc.binding !== null,
     key: doc.binding?.key ?? null,
@@ -282,6 +286,7 @@ export function summarizeDoc(doc: SessionDoc): WorklogSummary {
     measuredSeconds,
     gapSeconds: measuredSeconds - recordedSeconds,
     uncoveredCount: uncovered.length,
+    unrecordedCount: unrecorded.length,
     draftCount: entries.length,
     pendingCount: entries.filter(entry => entry.state !== 'synced').length,
     syncedCount: entries.filter(entry => entry.state === 'synced').length,

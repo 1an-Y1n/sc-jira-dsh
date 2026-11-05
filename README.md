@@ -182,3 +182,13 @@ pnpm run typecheck        # host + client
 - `src/jira-client.ts` — curl-backed REST client
 - `src/tool.ts` / `src/lossless.ts` — the tool boundary that makes every value lossless JSON
 - `src/client/` — locale, settings card, the three-tab view, the worklog panel, shared theme
+
+## The 本次 Worklog tab
+
+![The worklog tab](docs/screenshots/worklog-tab.png)
+
+The tab leads with the bound ticket, then the worklog rows (id, time, duration, note,
+state) and finally the agent's raw records behind a disclosure row. Click any time,
+duration or note to edit it in place; a synced row's edit is pushed to Jira first.
+`docs/screenshots/worklog-tab-records.png` shows the raw records, and
+`worklog-tab-edit.png` the inline editor.

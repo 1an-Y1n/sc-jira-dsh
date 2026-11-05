@@ -370,9 +370,15 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
         </div>
         <div style={{ marginTop: 4, fontSize: 13, color: FG, lineHeight: '20px' }}>{state?.summary}</div>
         <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', fontSize: 12, color: FG_MUTED }}>
-          <span>{t('worklog.recorded')} <strong style={{ color: FG }}>{fmtSeconds(state?.recordedSeconds ?? 0)}</strong> · {state?.activityCount ?? 0} {t('worklog.records')}</span>
+          <span>
+            {t('worklog.recorded')} <strong style={{ color: FG }}>{fmtSeconds(state?.recordedSeconds ?? 0)}</strong>
+            {' · '}{state?.activityCount ?? 0} {t('worklog.records')}
+          </span>
+          <span>·</span>
           <span>{t('worklog.measured')} <strong style={{ color: FG }}>{fmtSeconds(state?.measuredSeconds ?? 0)}</strong></span>
-          {gap > 0 && <Tag tone="warning">{t('worklog.gap')} {fmtSeconds(gap)}</Tag>}
+          {/* A couple of minutes either way is rounding, not a hole in the
+              records; only flag a gap worth looking at. */}
+          {gap >= 300 && <Tag tone="warning">{t('worklog.gap')} {fmtSeconds(gap)}</Tag>}
         </div>
       </div>
 
@@ -479,7 +485,7 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
           <Button
             variant="primary"
             size="sm"
-            disabled={busy || pending.length === 0}
+            disabled={busy || selected.size === 0}
             onClick={() => { void upload([...selected]) }}
           >
             {t('worklog.uploadSelected', { count: selected.size })}
@@ -506,18 +512,22 @@ export function WorklogPanel({ sessionId, t, fetchJson }: WorklogPanelProps): Re
       {/* Raw records — the agent's notes; editable until they become entries. */}
       {activities.length > 0 && (
         <>
-          <SectionLabel
-            trailing={t('worklog.recordsCount', { count: activities.length, locked: activities.filter(item => !item.editable).length })}
-          >
-            {t('worklog.activities')}
-          </SectionLabel>
+          <SectionLabel>{t('worklog.activities')}</SectionLabel>
           <DisclosureRow
             icon={<IconClockOutlineRegular />}
-            title={recordsOpen ? t('worklog.hideRecords') : t('worklog.showRecords')}
+            title={t('worklog.rawRecords')}
             open={recordsOpen}
             expandable
             expandOnRowClick
             onToggle={() => setRecordsOpen(open => !open)}
+            collapsedContent={
+              <span style={{ color: FG_FAINT, fontSize: 12 }}>
+                {t('worklog.recordsCount', {
+                  count: activities.length,
+                  locked: activities.filter(item => !item.editable).length,
+                })}
+              </span>
+            }
           >
             <table style={{ width: '100%', borderCollapse: 'collapse', font: '12px/18px sans-serif' }}>
               <tbody>
