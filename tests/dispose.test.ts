@@ -166,6 +166,20 @@ describe('host plugin dispose', () => {
     expect(unknownRes.statusCode).toBe(404)
   })
 
+  it('serves /suggest (and refuses it without a token)', async () => {
+    const { ctx, routes } = makeContext()
+    const { apply } = await import('../src/index.js')
+    apply(ctx, makeConfig({ token: 'x', server: 'http://127.0.0.1:9' }))
+
+    // The picker is unreachable, so the route reports the failure — which is
+    // how we know it reached the handler instead of 404-ing.
+    const mine = makeRequest('GET', '/api/scjira/suggest?query=DZ300')
+    const mineRes = makeResponse()
+    await routes[0].handler(mine.req, mineRes)
+    await mine.flush()
+    expect(mineRes.statusCode).toBe(502)
+  })
+
   it('a read route refuses to run without a token instead of calling Jira', async () => {
     const { ctx, routes } = makeContext()
     const { apply } = await import('../src/index.js')

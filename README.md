@@ -171,6 +171,7 @@ pnpm run typecheck        # host + client
 | `/api/scjira/list-my-open` | GET | Issues assigned to me that are still open |
 | `/api/scjira/list-worklog-week` | GET | Weekly report |
 | `/api/scjira/issue` | GET | One issue with comments |
+| `/api/scjira/suggest?query=` | GET | Issues matching what the reader typed (Jira's issue picker) |
 | `/api/scjira/worklog?sessionId=` | GET | The session's worklog document + totals |
 | `/api/scjira/worklog/edit` | POST | Edit a draft entry (a synced one is pushed to Jira first) |
 | `/api/scjira/worklog/activity` | POST | Edit or delete one raw record (`delete: true` to remove) |
@@ -201,6 +202,15 @@ pnpm run typecheck        # host + client
 - `src/jira-client.ts` — curl-backed REST client
 - `src/tool.ts` / `src/lossless.ts` — the tool boundary that makes every value lossless JSON
 - `src/client/` — locale, settings card, the three-tab view, the worklog panel, shared theme
+
+## The Issue 详情 tab
+
+![The issue picker](docs/screenshots/issue-suggest.png)
+
+The key field asks Jira what matches while the reader types: the issue picker
+answers a PREFIX and a summary, which a JQL `key =` cannot — a reader usually
+has half a key, or only remembers the title. Arrow keys move through the list,
+Enter opens one, and the exact key still works: the list is an aid, not a gate.
 
 ## The 本次 Worklog tab
 

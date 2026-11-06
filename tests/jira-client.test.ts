@@ -24,6 +24,44 @@ describe('JiraClient', () => {
     if (r.ok) expect(r.body.key).toBe('DZ300-1')
   })
 
+  it('suggest() asks the issue picker and flattens its sections', async () => {
+    const picker = {
+      sections: [
+        { label: '历史搜索', issues: [
+          { key: 'DZ300-1916', summary: 'SOP for burn image', summaryText: 'SOP for burn image' },
+          { key: 'DZ300-1927', summary: 'AI-empowered infrastructure', summaryText: 'AI-empowered infrastructure' },
+        ] },
+        { label: '其它', issues: [{ key: 'DZ300-1916', summary: 'dup' }] },
+      ],
+    }
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: JSON.stringify(picker) }) })
+    const r = await client.suggest('DZ300-19')
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.body).toEqual([
+      { key: 'DZ300-1916', summary: 'SOP for burn image' },
+      { key: 'DZ300-1927', summary: 'AI-empowered infrastructure' },
+    ])
+    // The picker is the prefix search: the query travels as a query parameter.
+    const args = (mockSpawn.mock.calls[0]?.[1] as string[] | undefined) ?? []
+    expect(args[args.length - 1]).toContain('/rest/api/2/issue/picker?query=DZ300-19')
+  })
+
+  it('suggest() asks nothing for an empty query', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
+    const r = await client.suggest('   ')
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.body).toEqual([])
+    expect(mockSpawn.mock.calls).toHaveLength(0)
+  })
+
+  it('suggest() reports a rejected request instead of pretending there are none', async () => {
+    const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 401, body: '' }) })
+    const r = await client.suggest('DZ300')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('auth')
+  })
+
   it('issue() sends Bearer auth header on every request', async () => {
     const client = new JiraClient(creds, { spawn: makeSpawnMock({ httpStatus: 200, body: '{}' }) })
     await client.issue('DZ300-1')

@@ -38,6 +38,7 @@ import {
   headCell,
 } from './theme.js'
 import { WorklogPanel } from './WorklogPanel.js'
+import { IssueSuggest, type Suggestion } from './IssueSuggest.js'
 import { getRuntime, type ScjiraRuntime } from './runtime.js'
 
 interface ScjiraViewProps {
@@ -520,25 +521,31 @@ function IssuePanel({ t, fetchJson }: { t: ScjiraViewProps['t']; fetchJson: Scji
 
   const issue = data?.ok === true ? data.issue : undefined
 
+  // What Jira matches for the text so far. The picker answers a PREFIX and a
+  // summary, which a JQL `key =` cannot: the reader usually has half a key.
+  const fetchSuggestions = React.useCallback(async (query: string): Promise<Suggestion[]> => {
+    try {
+      const r = await fetchJson<{ ok?: boolean; suggestions?: Suggestion[] }>(
+        `/api/scjira/suggest?query=${encodeURIComponent(query)}`,
+      )
+      return r.ok === true ? (r.suggestions ?? []) : []
+    } catch {
+      return []
+    }
+  }, [fetchJson])
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <input
+        <IssueSuggest
           value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') void lookup(input) }}
+          onChange={setInput}
+          onPick={key => { void lookup(key) }}
+          onSubmit={() => { void lookup(input) }}
+          fetchSuggestions={fetchSuggestions}
           placeholder={t('issue.placeholder')}
+          label={t('issue.key')}
           disabled={loading}
-          aria-label={t('issue.key')}
-          style={{
-            flex: 1,
-            padding: 6,
-            background: INPUT_BG,
-            color: FG,
-            border: `1px solid ${BORDER}`,
-            borderRadius: 4,
-            font: 'inherit',
-          }}
         />
         <button
           type="button"

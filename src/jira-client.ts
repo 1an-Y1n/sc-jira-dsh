@@ -115,6 +115,23 @@ interface RawSearchPage {
   issues: Array<{ key: string; id: string; fields: Record<string, unknown> }>
 }
 
+/** One issue the picker matched. */
+export interface Suggestion {
+  key: string
+  summary: string
+}
+
+/** Jira's issue picker response: sections of matched issues. */
+interface PickerResponse {
+  sections?: Array<{
+    label?: string
+    issues?: Array<{ key?: string; summary?: string; summaryText?: string }>
+  }>
+}
+
+/** How many suggestions one lookup returns. */
+const SUGGESTION_LIMIT = 12
+
 interface RawComment {
   id: string
   author?: { displayName?: string; name?: string }
@@ -203,6 +220,42 @@ export class JiraClient {
     } catch {
       return { ok: false, error: 'parse' }
     }
+  }
+
+  /**
+   * What matches this text.
+   *
+   * Jira's issue picker is the search the web UI's own "find an issue" field
+   * uses: it matches keys and summaries, and it is the only Jira search that
+   * answers a PREFIX — a JQL `key =` needs the whole key, which is exactly
+   * what the reader does not have yet while typing.
+   *
+   * @param query - what the reader typed.
+   * @returns the matching issues, best first, capped.
+   */
+  async suggest(query: string, signal?: AbortSignal): Promise<JiraResult<Suggestion[]>> {
+    const text = query.trim()
+    if (text === '') return { ok: true, body: [] }
+    const url = apiUrl(
+      this.creds.server,
+      `/issue/picker?query=${encodeURIComponent(text)}&currentValue=&showSubTasks=true`,
+    )
+    const { status, body } = await this.curl(url, signal)
+    const bad = this.classify(status, body)
+    if (bad) return bad
+    const parsed = this.tryParse<PickerResponse>(body)
+    if (!parsed.ok) return parsed
+    const seen = new Set<string>()
+    const suggestions: Suggestion[] = []
+    for (const section of parsed.body.sections ?? []) {
+      for (const issue of section.issues ?? []) {
+        if (issue.key === undefined || seen.has(issue.key)) continue
+        seen.add(issue.key)
+        suggestions.push({ key: issue.key, summary: issue.summaryText ?? issue.summary ?? '' })
+        if (suggestions.length >= SUGGESTION_LIMIT) return { ok: true, body: suggestions }
+      }
+    }
+    return { ok: true, body: suggestions }
   }
 
   async issue(key: string, signal?: AbortSignal): Promise<JiraResult<RawIssue>> {
