@@ -166,7 +166,18 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     get proxy() { return config.proxy.get() },
   }
 
-  const policy = policyOf(config.worklog)
+  /**
+   * The worklog policy, read LIVE.
+   *
+   * The credentials above are live getters, so a settings write is visible to
+   * the next call without a restart. The policy is configuration too, and it
+   * used to be captured once — which meant that changing `worklog.minSeconds`
+   * or turning `worklog.autoGenerate` off needed a restart to take effect.
+   * Reading it per call makes the whole configuration behave the same way.
+   */
+  function policy(): WorklogPolicy {
+    return policyOf(config.worklog)
+  }
 
   // 2. JiraClient singleton — rebuilt when creds change (token rotation).
   let client: JiraClient | null = null
@@ -181,7 +192,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
   }
 
   function worklogDeps(): WorklogDeps {
-    return { storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }
+    return { storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server }
   }
 
   /** The session a tool call belongs to. `exec.agent.id` IS the SessionId. */
@@ -266,14 +277,14 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
           if (method === 'GET' && pathname.endsWith('/worklog')) {
             const sessionId = query.get('sessionId') ?? ''
             if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
-            json(200, { ok: true, ...(await handleWorklogState({ storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }, { sessionId })) })
+            json(200, { ok: true, ...(await handleWorklogState({ storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server }, { sessionId })) })
             return
           }
           if (method === 'POST' && pathname.endsWith('/worklog/edit')) {
             const body = await readBody()
             const sessionId = String(body.sessionId ?? '')
             if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
-            const r = await handleEditDraft({ storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }, {
+            const r = await handleEditDraft({ storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server }, {
               sessionId,
               id: String(body.id ?? ''),
               seconds: typeof body.seconds === 'number' ? body.seconds : undefined,
@@ -287,7 +298,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
             const body = await readBody()
             const sessionId = String(body.sessionId ?? '')
             if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
-            const depsForRoute = { storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }
+            const depsForRoute = { storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server }
             if (body.delete === true) {
               const r = await handleDeleteActivity(depsForRoute, { sessionId, id: String(body.id ?? '') })
               json(r.ok ? 200 : 400, r)
@@ -308,7 +319,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
             const sessionId = String(body.sessionId ?? '')
             if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
             const r = await handleDeleteDraftEntry(
-              { storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server },
+              { storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server },
               { sessionId, id: String(body.id ?? '') },
             )
             json(r.ok ? 200 : 400, r)
@@ -318,7 +329,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
             const body = await readBody()
             const sessionId = String(body.sessionId ?? '')
             if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
-            const r = await handleDiscardWorklog({ storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }, { sessionId })
+            const r = await handleDiscardWorklog({ storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server }, { sessionId })
             json(r.ok ? 200 : 400, r)
             return
           }
@@ -328,7 +339,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
             const ids = Array.isArray(body.ids) ? body.ids.map(String) : []
             if (sessionId === '') { json(400, { ok: false, error: 'sessionId is required' }); return }
             if (!creds.token) { json(503, { ok: false, error: '请先在 Settings 填 Jira credentials' }); return }
-            const r = await handleUploadWorklog({ storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }, { sessionId, ids })
+            const r = await handleUploadWorklog({ storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server }, { sessionId, ids })
             json(r.ok ? 200 : 400, r)
             return
           }
@@ -547,7 +558,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
     description:
       '记录一段工作：一句话说明做了什么，以及花了多久。这句话会直接成为 Jira 工时里的说明文字，' +
       '所以请写成一句能单独看懂的话。seconds 可省略——省略时按距上次记录的时间自动测量' +
-      `（下限 ${formatDuration(policy.minSeconds)}，单条封顶 ${formatDuration(policy.maxSecondsPerActivity)}）。`,
+      '（下限与单条上限由配置决定）。',
     parameters: {
       summary: { type: 'string', required: true, description: '一句话说明这段工作做了什么' },
       seconds: { type: 'number', description: '这段工作的秒数；省略则按墙钟自动测量' },
@@ -833,7 +844,7 @@ export function apply(ctx: Context, config: ScjiraConfig): void {
       // the work, and the duration is a clock reading — which is why this can
       // happen at the end of every turn rather than at the end of the
       // session, where the conversation may have been compacted away.
-      await handleTurnFinished({ storeDir: config.storeDir, policy, jira: makeClient(), server: creds.server }, {
+      await handleTurnFinished({ storeDir: config.storeDir, policy: policy(), jira: makeClient(), server: creds.server }, {
         sessionId: payload.agent.id,
         turn: payload.turn,
         startedAt: localTimestamp(open.startedAt),
